@@ -1,0 +1,11 @@
+import { z } from 'zod';
+export const localeSchema = z.enum(['en', 'ht', 'fr']);
+export const credentialsSchema = z.object({ email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), password: z.string().min(12).max(128) }).strict();
+export const registerSchema = credentialsSchema.extend({ locale: localeSchema.default('en') });
+export const refreshSchema = z.object({ refreshToken: z.string().min(32).max(256) }).strict();
+export const deviceSchema = z.object({ name: z.string().trim().min(1).max(80), supportsEsim: z.boolean(), unlocked: z.boolean() }).strict();
+export const checkoutSchema = z.object({ planId: z.string().min(1).max(80), deviceId: z.string().uuid() }).strict();
+export const idempotencySchema = z.string().uuid();
+export const mockPaymentSchema = z.object({ outcome: z.enum(['success', 'failure']) }).strict();
+export const installationActionSchema = z.object({ action: z.enum(['start-install', 'confirm-install', 'activate']) }).strict();
+export const idSchema = z.string().uuid();

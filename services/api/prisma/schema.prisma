@@ -1,0 +1,173 @@
+generator client {
+  provider = "prisma-client-js"
+}
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+enum Locale {
+  en
+  ht
+  fr
+}
+enum SubscriptionState {
+  PENDING
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELING
+  CANCELED
+  EXPIRED
+}
+enum PaymentState {
+  PENDING
+  SUCCEEDED
+  FAILED
+}
+enum EsimState {
+  CREATED
+  READY
+  INSTALLED
+  ACTIVE
+  SUSPENDED
+  EXPIRED
+  TERMINATED
+  ERROR
+}
+enum InstallationState {
+  NOT_CREATED
+  PROVISIONING
+  READY_TO_INSTALL
+  INSTALLING
+  INSTALLED
+  ACTIVATING
+  ACTIVE
+  FAILED
+}
+enum JobState {
+  PENDING
+  RUNNING
+  COMPLETE
+  FAILED
+}
+model User {
+  id           String         @id @default(uuid()) @db.Uuid
+  email        String         @unique
+  passwordHash String
+  locale       Locale         @default(en)
+  createdAt    DateTime       @default(now())
+  sessions     Session[]
+  devices      Device[]
+  subscriptions Subscription[]
+}
+model Session {
+  id          String   @id @default(uuid()) @db.Uuid
+  userId      String   @db.Uuid
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash   String   @unique
+  familyId    String   @db.Uuid
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime @default(now())
+  @@index([userId])
+  @@index([familyId])
+}
+model Device {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @db.Uuid
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name         String
+  supportsEsim Boolean
+  unlocked     Boolean
+  compatible   Boolean
+  verification String   @default("SELF_REPORTED")
+  createdAt    DateTime @default(now())
+  subscriptions Subscription[]
+  @@index([userId])
+}
+model Plan {
+  id           String @id
+  name         String
+  dataGb       Int
+  durationDays Int
+  priceCents   Int
+  currency     String @default("usd")
+  pricingLabel String @default("PLACEHOLDER_PRICING")
+  enabled      Boolean @default(true)
+  subscriptions Subscription[]
+}
+model Subscription {
+  id         String @id @default(uuid()) @db.Uuid
+  userId     String @db.Uuid
+  user       User   @relation(fields: [userId], references: [id])
+  deviceId   String @db.Uuid
+  device     Device @relation(fields: [deviceId], references: [id])
+  planId     String
+  plan       Plan @relation(fields: [planId], references: [id])
+  state      SubscriptionState @default(PENDING)
+  createdAt  DateTime @default(now())
+  expiresAt  DateTime?
+  payment    Payment?
+  esim       Esim?
+  @@index([userId])
+}
+model Payment {
+  id               String @id @default(uuid()) @db.Uuid
+  subscriptionId   String @unique @db.Uuid
+  subscription     Subscription @relation(fields: [subscriptionId], references: [id])
+  checkoutKey      String @unique
+  checkoutReference String? @unique
+  checkoutUrl      String?
+  amountCents      Int
+  currency         String
+  mode             String
+  state            PaymentState @default(PENDING)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  events           WebhookEvent[]
+}
+model WebhookEvent {
+  id          String @id
+  type        String
+  paymentId   String @db.Uuid
+  payment     Payment @relation(fields: [paymentId], references: [id])
+  processedAt DateTime @default(now())
+}
+model Esim {
+  id                String @id @default(uuid()) @db.Uuid
+  subscriptionId    String @unique @db.Uuid
+  subscription      Subscription @relation(fields: [subscriptionId], references: [id])
+  provider          String
+  providerReference String? @unique
+  simulated         Boolean @default(true)
+  state             EsimState @default(CREATED)
+  installationState InstallationState @default(NOT_CREATED)
+  activationCipher  String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  job               ProvisioningJob?
+  usage             Usage[]
+}
+model ProvisioningJob {
+  id          String @id @default(uuid()) @db.Uuid
+  esimId      String @unique @db.Uuid
+  esim        Esim @relation(fields: [esimId], references: [id])
+  state       JobState @default(PENDING)
+  attempts    Int @default(0)
+  availableAt DateTime @default(now())
+  leaseUntil  DateTime?
+  leaseToken  String?
+  lastError   String?
+  createdAt   DateTime @default(now())
+  @@index([state, availableAt])
+}
+model Usage {
+  id         String @id @default(uuid()) @db.Uuid
+  esimId     String @db.Uuid
+  esim       Esim @relation(fields: [esimId], references: [id])
+  usedBytes  BigInt
+  totalBytes BigInt
+  measuredAt DateTime
+  simulated  Boolean
+  @@index([esimId, measuredAt])
+}
