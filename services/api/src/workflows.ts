@@ -6,7 +6,9 @@ import type { Config } from './config.js';
 import { encrypt } from './crypto.js';
 import { AppError, notFound } from './errors.js';
 export async function lock(tx: Prisma.TransactionClient, key: string) {
-  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${key}))`;
+  // Prisma cannot decode PostgreSQL's `void` result from pg_advisory_xact_lock.
+  // Test for NULL in SQL so the driver only needs to decode a boolean.
+  await tx.$queryRaw<{ acquired: boolean }[]>`SELECT pg_advisory_xact_lock(hashtext(${key})) IS NULL AS acquired`;
 }
 export class Workflows {
   constructor(readonly db: PrismaClient, readonly provider: EsimProvider, readonly billing: BillingService, readonly config: Config) {}

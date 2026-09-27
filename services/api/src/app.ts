@@ -17,14 +17,27 @@ import { lock, Workflows } from './workflows.js';
 declare module '@fastify/jwt' { interface FastifyJWT { payload: { sub: string; sid: string }; user: { sub: string; sid: string } } }
 export const publicEsim = (e: Esim) => ({ id: e.id, subscriptionId: e.subscriptionId, state: e.state, installationState: e.installationState, simulated: e.simulated, provider: e.provider });
 const publicUser = (u: User) => ({ id: u.id, email: u.email, locale: u.locale });
-export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider: EsimProvider; billing: BillingService; config: Config; logger?: boolean }) {
+function safeDiagnosticText(value: string) {
+  return value
+    .replace(/(?:postgres(?:ql)?|redis):\/\/[^\s"']+/gi, '[redacted connection URL]')
+    .replace(/\b(?:sk|rk)_(?:test|live)_[A-Za-z0-9_-]+/g, '[redacted payment key]')
+    .replace(/\bwhsec_[A-Za-z0-9_-]+/g, '[redacted webhook key]')
+    .replace(/\bBearer\s+[^\s]+/gi, 'Bearer [redacted]')
+    .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted token]')
+    .replace(/((?:password|token|secret|activation|install|code)\s*[=:]\s*)[^\s,;]+/gi, '$1[redacted]');
+}
+export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider: EsimProvider; billing: BillingService; config: Config; logger?: boolean; diagnosticSink?: (entry: Record<string, unknown>) => void }) {
   const { db, redis, provider, billing, config } = deps;
   const workflow = new Workflows(db, provider, billing, config);
   const app = Fastify({ logger: deps.logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body', 'res.body'] } : false, disableRequestLogging: true, bodyLimit: 64 * 1024, trustProxy: false });
   await app.register(cors, { origin: config.CORS_ORIGINS.split(',').map(s => s.trim()), methods: ['GET', 'POST'], allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'] });
   await app.register(helmet);
   await app.register(jwt, { secret: config.ACCESS_TOKEN_SECRET, sign: { expiresIn: '10m', iss: 'konekte-api', aud: 'konekte-app' }, verify: { allowedIss: 'konekte-api', allowedAud: 'konekte-app', algorithms: ['HS256'] } });
-  await app.register(rateLimit, { redis, max: 120, timeWindow: '1 minute', skipOnError: false, nameSpace: `konekte:${config.NODE_ENV}:rate:`, errorResponseBuilder: () => ({ error: { code: 'RATE_LIMITED', message: 'Please wait a moment and try again.' } }) });
+  await app.register(rateLimit, {
+    redis, max: 120, timeWindow: '1 minute', skipOnError: false, nameSpace: `konekte:${config.NODE_ENV}:rate:`,
+    // @fastify/rate-limit throws this value. Preserve its HTTP status for our global handler.
+    errorResponseBuilder: (_request, context) => Object.assign(new Error('Please wait a moment and try again.'), { statusCode: context.statusCode })
+  });
   app.addHook('onSend', async (_request, reply) => { reply.header('Cache-Control', 'no-store'); });
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof AppError) return reply.status(error.status).send({ error: { code: error.code, message: error.message, requestId: request.id } });
@@ -34,6 +47,20 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
     if (status >= 400 && status < 500) return reply.status(status).send({ error: { code: status === 429 ? 'RATE_LIMITED' : 'INVALID_REQUEST', message: status === 429 ? 'Please wait a moment and try again.' : 'The request could not be accepted.', requestId: request.id } });
     // Do not serialize arbitrary exceptions: provider/DB SDK errors can contain credentials.
     request.log.error({ code: 'INTERNAL_ERROR', requestId: request.id }, 'Request failed');
+    if (config.NODE_ENV === 'test') {
+      const prismaCode = error instanceof Prisma.PrismaClientKnownRequestError ? error.code : undefined;
+      const entry = {
+        requestId: request.id,
+        errorClass: error instanceof Error ? error.constructor.name : typeof error,
+        message: safeDiagnosticText(error instanceof Error ? error.message : String(error)),
+        stack: safeDiagnosticText(error instanceof Error ? error.stack ?? '' : ''),
+        prismaCode,
+        fastifyStatus: status,
+        redisCommand: error instanceof Error && 'command' in error ? safeDiagnosticText(String(error.command)) : undefined
+      };
+      if (deps.diagnosticSink) deps.diagnosticSink(entry);
+      else console.error(`[test-only server diagnostic] ${JSON.stringify(entry)}`);
+    }
     return reply.status(500).send({ error: { code: 'INTERNAL_ERROR', message: 'Something went wrong. Please try again.', requestId: request.id } });
   });
   app.setNotFoundHandler((_request, reply) => reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'This page is not available.' } }));
