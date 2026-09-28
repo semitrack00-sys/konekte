@@ -51,8 +51,10 @@ export class Workflows {
       if (!device.compatible) throw new AppError(409, 'INCOMPATIBLE_DEVICE', 'Check your phone before choosing a plan.');
       const plan = await tx.plan.findFirst({ where: { id: planId, enabled: true } });
       if (!plan) notFound();
+      const mapping = await tx.planProviderMapping.findFirst({ where: { planId, providerId: this.provider.id, active: true }, include: { product: true } });
+      if (!mapping?.product.enabled) throw new AppError(409, 'PLAN_UNAVAILABLE', 'This plan is not available right now.');
       return tx.payment.create({ data: { checkoutKey, amountCents: plan.priceCents, currency: plan.currency, mode: this.billing.mode,
-        subscription: { create: { userId, deviceId, planId } } }, include: { subscription: { include: { plan: true } } } });
+        subscription: { create: { userId, deviceId, planId, providerMappingId: mapping.id, providerIdSnapshot: mapping.providerId, providerProductIdSnapshot: mapping.product.providerProductId, providerMappingVersion: mapping.version } } }, include: { subscription: { include: { plan: true } } } });
     });
     if (payment.mode !== this.billing.mode) throw new AppError(409, 'BILLING_MODE_CHANGED', 'Start a new test payment.');
     if (!payment.checkoutReference) {
@@ -112,8 +114,7 @@ export class Workflows {
     const renewal = await this.db.renewalPayment.findUnique({
       where: { id: renewalId },
       include: { subscription: { include: {
-        esim: true,
-        plan: { include: { providerMappings: { where: { providerId: this.provider.id, active: true }, include: { product: true } } } }
+        esim: true, plan: true
       } } }
     });
     if (!renewal || renewal.state !== 'SUCCEEDED') return false;
@@ -121,15 +122,15 @@ export class Workflows {
     const operation = await this.db.providerOperation.findUnique({ where: { idempotencyKey: opKey } });
     if (!operation || operation.status === 'SUCCEEDED' || operation.status === 'FAILED') return Boolean(operation?.status === 'SUCCEEDED');
     const esim = renewal.subscription.esim;
-    const mapping = renewal.subscription.plan.providerMappings[0];
-    if (!this.provider.capabilities.persistentEsim || !this.provider.capabilities.topUp || !esim?.providerReference || esim.state !== 'ACTIVE' || !mapping?.product.enabled) {
+    const productId = renewal.subscription.providerProductIdSnapshot;
+    if (!this.provider.capabilities.persistentEsim || !this.provider.capabilities.topUp || !esim?.providerReference || esim.state !== 'ACTIVE' || !productId) {
       await this.db.providerOperation.update({ where: { idempotencyKey: opKey }, data: { status: 'FAILED', safeErrorCode: 'CAPABILITY_OR_STATE_UNSUPPORTED', attempts: { increment: 1 } } });
       return false;
     }
     const claim = await this.db.providerOperation.updateMany({ where: { idempotencyKey: opKey, status: { in: ['PENDING', 'RETRYABLE_FAILURE'] } }, data: { status: 'RUNNING', attempts: { increment: 1 }, safeErrorCode: null } });
     if (claim.count !== 1) return false;
     try {
-      const result = await this.provider.topUp({ reference: esim.providerReference, productId: mapping.product.providerProductId, idempotencyKey: opKey });
+      const result = await this.provider.topUp({ reference: esim.providerReference, productId, idempotencyKey: opKey });
       if (!result.packageAssigned) throw new Error('Package assignment was not confirmed');
       await this.db.$transaction(async tx => {
         await tx.providerOperation.update({ where: { idempotencyKey: opKey }, data: { status: 'SUCCEEDED', providerReferenceId: result.reference, safeErrorCode: null } });
@@ -154,7 +155,7 @@ export class Workflows {
         data: { state: 'RUNNING', leaseUntil: new Date(Date.now() + 60_000), leaseToken, attempts: { increment: 1 } },
         include: { esim: { include: { subscription: { include: {
           payment: true,
-          plan: { include: { providerMappings: { where: { providerId: this.provider.id, active: true }, include: { product: true } } } }
+          plan: true
         } } } } }
       });
       await tx.esim.update({ where: { id: claimed.esimId }, data: { installationState: 'PROVISIONING' } });
@@ -164,10 +165,10 @@ export class Workflows {
     try {
       if (job.esim.subscription.payment?.state !== 'SUCCEEDED' || job.esim.provider !== this.provider.id) throw new Error('Provisioning precondition failed');
       const plan = job.esim.subscription.plan;
-      const mapping = plan.providerMappings[0];
-      if (!mapping?.product.enabled) throw new Error('Provider product mapping unavailable');
+      const mappingId = job.esim.subscription.providerProductIdSnapshot;
+      if (!mappingId || job.esim.subscription.providerIdSnapshot !== this.provider.id) throw new Error('Provider product mapping unavailable');
       await this.db.providerOperation.upsert({ where: { idempotencyKey: `provision:${job.esim.subscriptionId}` }, create: { operationType: 'PROVISION', entityType: 'ESIM', entityId: job.esimId, providerId: this.provider.id, idempotencyKey: `provision:${job.esim.subscriptionId}`, status: 'RUNNING', attempts: job.attempts }, update: { status: 'RUNNING', attempts: job.attempts, safeErrorCode: null } });
-      const result = await this.provider.provision({ idempotencyKey: job.esim.subscriptionId, planId: plan.id, productId: mapping.product.providerProductId, dataGb: plan.dataGb, durationDays: plan.durationDays });
+      const result = await this.provider.provision({ idempotencyKey: job.esim.subscriptionId, planId: plan.id, productId: mappingId, dataGb: plan.dataGb, durationDays: plan.durationDays });
       await this.db.providerOperation.upsert({ where: { idempotencyKey: `provision:${job.esim.subscriptionId}` }, create: { operationType: 'PROVISION', entityType: 'ESIM', entityId: job.esimId, providerId: this.provider.id, providerReferenceId: result.reference, idempotencyKey: `provision:${job.esim.subscriptionId}`, status: 'SUCCEEDED', attempts: job.attempts }, update: { providerReferenceId: result.reference, status: 'SUCCEEDED', attempts: job.attempts, safeErrorCode: null } });
       await this.db.$transaction(async tx => {
         const completed = await tx.provisioningJob.updateMany({ where: { id: job.id, state: 'RUNNING', leaseToken }, data: { state: 'COMPLETE', leaseUntil: null, leaseToken: null, lastError: null } });

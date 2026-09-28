@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MockEsimProvider, MockProviderWebhookVerifier } from '@konekte/esim-provider-sdk';
+import { MockEsimProvider, MockProviderWebhookVerifier, TemplateEsimProvider, verifyProviderSandbox } from '@konekte/esim-provider-sdk';
 import { randomBytes } from 'node:crypto';
 
 describe('vendor-neutral simulated provider contract', () => {
@@ -29,6 +29,19 @@ describe('vendor-neutral simulated provider contract', () => {
   it('declares persistent top-up while gating unsupported auto-renew and phone services', async () => {
     const provider = new MockEsimProvider();
     expect(provider.capabilities).toMatchObject({ persistentEsim: true, topUp: true, autoRenew: false, voice: false, sms: false, phoneNumber: false, simulated: true });
+  });
+  it('keeps the template adapter fail-closed and never falls back to simulated provisioning', async () => {
+    const template = new TemplateEsimProvider({ providerName: 'not-a-real-vendor', timeoutMs: 1000, retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 }, enabledCountries: ['HT'], environment: 'SANDBOX', capabilityOverrides: {}, enabled: true });
+    expect(template.capabilities.simulated).toBe(false);
+    await expect(template.getCoverage('HT')).rejects.toMatchObject({ code: 'NOT_CONFIGURED' });
+    await expect(template.provision({ idempotencyKey: 'x', productId: 'x', dataGb: 1, durationDays: 1 })).rejects.toMatchObject({ code: 'UNSUPPORTED' });
+  });
+  it('runs safe sandbox contract probes and gates destructive termination', async () => {
+    const checks = await verifyProviderSandbox(new MockEsimProvider(), { environment: 'SANDBOX', countryCode: 'HT' });
+    expect(checks.filter(check => check.status === 'FAIL')).toEqual([]);
+    expect(checks.find(check => check.name === 'same_esim_top_up')?.status).toBe('PASS');
+    expect(checks.find(check => check.name === 'terminate')).toMatchObject({ status: 'SKIP', errorCode: 'EXPLICIT_OPT_IN_REQUIRED' });
+    await expect(verifyProviderSandbox(new MockEsimProvider(), { environment: 'PRODUCTION', countryCode: 'HT' })).rejects.toThrow('cannot run against production');
   });
   it('verifies signatures over raw webhook bytes without imposing vendor formats', () => {
     const verifier = new MockProviderWebhookVerifier(randomBytes(32).toString('hex'));

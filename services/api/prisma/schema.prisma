@@ -82,6 +82,15 @@ enum ReconciliationStatus {
   OPEN
   RESOLVED
 }
+enum ProviderEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+enum QualificationAnswer {
+  UNKNOWN
+  YES
+  NO
+}
 model User {
   id           String         @id @default(uuid()) @db.Uuid
   email        String         @unique
@@ -145,6 +154,11 @@ model Subscription {
   periodStart DateTime?
   periodEnd DateTime?
   renewals RenewalPayment[]
+  providerMappingId String? @db.Uuid
+  providerMapping PlanProviderMapping? @relation(fields: [providerMappingId], references: [id], onDelete: Restrict)
+  providerIdSnapshot String?
+  providerProductIdSnapshot String?
+  providerMappingVersion Int?
   @@index([userId])
 }
 model Payment {
@@ -219,6 +233,8 @@ model Provider {
   operations ProviderOperation[]
   webhookEvents ProviderWebhookEvent[]
   reconciliationIssues ReconciliationIssue[]
+  configuration ProviderConfiguration?
+  qualifications ProviderQualification[]
 }
 model ProviderProduct {
   id String @id @default(uuid()) @db.Uuid
@@ -231,6 +247,10 @@ model ProviderProduct {
   durationDays Int
   simulated Boolean @default(true)
   enabled Boolean @default(true)
+  wholesalePriceCents Int?
+  wholesaleCurrency String?
+  networkMetadata Json?
+  capabilityMetadata Json?
   mappings PlanProviderMapping[]
   @@unique([providerId, providerProductId, countryCode])
 }
@@ -243,7 +263,75 @@ model PlanProviderMapping {
   providerProductId String @db.Uuid
   product ProviderProduct @relation(fields: [providerProductId], references: [id], onDelete: Cascade)
   active Boolean @default(true)
-  @@unique([planId, providerId])
+  version Int @default(1)
+  effectiveAt DateTime @default(now())
+  createdAt DateTime @default(now())
+  subscriptions Subscription[]
+  audits ProviderMappingAudit[]
+  @@unique([planId, providerId, version])
+  @@index([planId, providerId, active])
+}
+model ProviderConfiguration {
+  id String @id @default(uuid()) @db.Uuid
+  providerId String @unique
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  apiBaseUrl String?
+  apiKeyReference String?
+  webhookSecretReference String?
+  accountCustomerId String?
+  timeoutMs Int @default(10000)
+  maxAttempts Int @default(3)
+  retryBaseDelayMs Int @default(250)
+  retryMaxDelayMs Int @default(5000)
+  enabledCountries String[] @default([])
+  environment ProviderEnvironment @default(SANDBOX)
+  capabilityOverrides Json?
+  enabled Boolean @default(false)
+  updatedAt DateTime @updatedAt
+}
+model ProviderQualification {
+  id String @id @default(uuid()) @db.Uuid
+  providerId String
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  countryCode String @default("HT")
+  haitiSupported QualificationAnswer @default(UNKNOWN)
+  networkNames String[] @default([])
+  lte4g QualificationAnswer @default(UNKNOWN)
+  fiveG QualificationAnswer @default(UNKNOWN)
+  persistentEsim QualificationAnswer @default(UNKNOWN)
+  topUpSameEsim QualificationAnswer @default(UNKNOWN)
+  packageReplacement QualificationAnswer @default(UNKNOWN)
+  usageApi QualificationAnswer @default(UNKNOWN)
+  usageWebhook QualificationAnswer @default(UNKNOWN)
+  hotspotPolicy String?
+  throttlingFup String?
+  packageExpirationBehavior String?
+  activationMethod String?
+  qrInstallation QualificationAnswer @default(UNKNOWN)
+  manualInstallation QualificationAnswer @default(UNKNOWN)
+  webhookAuthentication String?
+  idempotencySupport QualificationAnswer @default(UNKNOWN)
+  reconciliationSupport QualificationAnswer @default(UNKNOWN)
+  failedProvisioningRefundBehavior String?
+  sandboxAvailable QualificationAnswer @default(UNKNOWN)
+  productionAvailable QualificationAnswer @default(UNKNOWN)
+  commercialMinimums Json?
+  wholesaleCurrency String?
+  updatedAt DateTime @updatedAt
+  @@unique([providerId, countryCode])
+}
+model ProviderMappingAudit {
+  id String @id @default(uuid()) @db.Uuid
+  mappingId String @db.Uuid
+  mapping PlanProviderMapping @relation(fields: [mappingId], references: [id], onDelete: Restrict)
+  planId String
+  providerId String
+  priorProductRecordId String?
+  newProductRecordId String
+  version Int
+  actor String
+  changedAt DateTime @default(now())
+  @@index([planId, providerId, changedAt])
 }
 model ProviderOperation {
   id String @id @default(uuid()) @db.Uuid

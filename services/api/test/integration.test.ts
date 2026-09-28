@@ -11,6 +11,7 @@ import { MockBillingService } from '../src/billing.js';
 import { readConfig } from '../src/config.js';
 import { seedPlans } from '../src/seed.js';
 import { Workflows } from '../src/workflows.js';
+import { importProviderCatalog } from '../src/provider-catalog.js';
 if (!process.env.DATABASE_URL || new URL(process.env.DATABASE_URL).pathname !== '/konekte_test') throw new Error('Tests require the dedicated konekte_test database.');
 const db = new PrismaClient();
 const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 1 });
@@ -63,7 +64,7 @@ beforeAll(async () => {
 });
 beforeEach(async () => {
   // Guard above prevents accidental truncation of development or production databases.
-  await db.$executeRawUnsafe('TRUNCATE TABLE "RenewalWebhookEvent", "RenewalPayment", "ProviderWebhookEvent", "ProviderOperation", "ReconciliationIssue", "PlanProviderMapping", "ProviderProduct", "Usage", "ProvisioningJob", "Esim", "WebhookEvent", "Payment", "Subscription", "Device", "Session", "User", "Plan" CASCADE');
+  await db.$executeRawUnsafe('TRUNCATE TABLE "RenewalWebhookEvent", "RenewalPayment", "ProviderWebhookEvent", "ProviderOperation", "ReconciliationIssue", "ProviderMappingAudit", "PlanProviderMapping", "ProviderProduct", "Usage", "ProvisioningJob", "Esim", "WebhookEvent", "Payment", "Subscription", "Device", "Session", "User", "Plan" CASCADE');
   const keys = await redis.keys('konekte:test:rate:*'); if (keys.length) await redis.del(...keys);
   vi.restoreAllMocks(); await seedPlans(db);
 });
@@ -129,8 +130,36 @@ describe('provider operations and renewals', () => {
   it('keeps provider product IDs out of the public plan catalog while storing an internal mapping', async () => {
     const response = await app.inject({ url: '/api/v1/plans' });
     expect(response.statusCode).toBe(200); expect(response.body).not.toContain('mock-basic-10gb');
-    const mapping = await db.planProviderMapping.findUniqueOrThrow({ where: { planId_providerId: { planId: 'basic', providerId: 'mock' } }, include: { product: true } });
+    const mapping = await db.planProviderMapping.findFirstOrThrow({ where: { planId: 'basic', providerId: 'mock', active: true }, include: { product: true } });
     expect(mapping.product.providerProductId).toBe('mock-basic-10gb');
+  });
+  it('imports normalized wholesale catalog data without exposing it to customers and marks unknown margin unavailable', async () => {
+    await importProviderCatalog(db, 'mock', [{ providerProductId: 'mock-basic-10gb', countryCode: 'HT', name: 'Imported package', dataGb: 10, durationDays: 30, wholesalePriceCents: null, currency: 'USD', networkMetadata: null, capabilityMetadata: null }]);
+    const product = await db.providerProduct.findFirstOrThrow({ where: { providerProductId: 'mock-basic-10gb' } });
+    expect(product.wholesalePriceCents).toBeNull(); expect(product.wholesaleCurrency).toBeNull();
+    expect((await app.inject({ url: '/api/v1/plans' })).body).not.toContain('mock-basic-10gb');
+    const admin = await app.inject({ url: '/api/v1/admin/provider-products' });
+    expect(admin.statusCode).toBe(200); expect(admin.body).toContain('"estimatedGrossMarginCents":null');
+  });
+  it('versions and audits mapping changes while existing purchases keep their provider product snapshot', async () => {
+    const p = await prepared();
+    const before = await db.subscription.findUniqueOrThrow({ where: { id: p.checkout.subscriptionId } });
+    const product = await importProviderCatalog(db, 'mock', [{ providerProductId: 'future-basic-v2', countryCode: 'HT', name: 'Mock future product', dataGb: 10, durationDays: 30, wholesalePriceCents: 400, currency: 'USD', networkMetadata: null, capabilityMetadata: null }]);
+    const response = await app.inject({ method: 'POST', url: '/api/v1/admin/plans/basic/mappings', payload: { providerId: 'mock', productRecordId: product[0]!.id } });
+    expect(response.statusCode).toBe(200);
+    const historical = await db.subscription.findUniqueOrThrow({ where: { id: p.checkout.subscriptionId } });
+    expect(historical.providerProductIdSnapshot).toBe(before.providerProductIdSnapshot);
+    expect(historical.providerMappingVersion).toBe(1);
+    expect(await db.planProviderMapping.findMany({ where: { planId: 'basic', providerId: 'mock' }, orderBy: { version: 'asc' }, select: { version: true, active: true } })).toEqual([{ version: 1, active: false }, { version: 2, active: true }]);
+    expect(await db.providerMappingAudit.count({ where: { planId: 'basic', providerId: 'mock', version: 2 } })).toBe(1);
+  });
+  it('reports unknown-first Haiti qualification and health without returning secret references', async () => {
+    await db.providerConfiguration.update({ where: { providerId: 'template' }, data: { apiKeyReference: 'PROVIDER_API_KEY', webhookSecretReference: 'PROVIDER_WEBHOOK_SECRET' } });
+    const health = await app.inject({ url: '/health/providers' });
+    expect(health.statusCode).toBe(200); expect(health.body).not.toContain('PROVIDER_API_KEY'); expect(health.body).not.toContain('PROVIDER_WEBHOOK_SECRET');
+    expect(health.body).toContain('NOT_CONFIGURED'); expect(health.body).toContain('AVAILABLE');
+    const coverage = await app.inject({ url: '/api/v1/admin/providers/template/coverage/HT' });
+    expect(coverage.json()).toMatchObject({ countryCode: 'HT', status: 'NOT_CONFIGURED', customerAvailabilityGuaranteed: false, qualification: { haitiSupported: 'UNKNOWN', fiveG: 'UNKNOWN', persistentEsim: 'UNKNOWN' } });
   });
   it('records provider operation idempotency with a unique key', async () => {
     const p = await provisioned();

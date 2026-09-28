@@ -79,6 +79,11 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
     return { accessToken: app.jwt.sign({ sub: user.id, sid: session.id }), refreshToken, user: publicUser(user) };
   }
   app.get('/health', async () => ({ status: 'ok', service: 'konekte-api' }));
+  const providerSummary = async () => {
+    const providers = await db.provider.findMany({ include: { configuration: true, products: { where: { enabled: true }, select: { id: true } }, operations: { where: { status: { in: ['SUCCEEDED', 'FAILED', 'RETRYABLE_FAILURE', 'RECONCILIATION_REQUIRED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 } } });
+    return providers.map(row => ({ id: row.id, displayName: row.displayName, configurationStatus: row.configuration?.enabled ? 'CONFIGURED' : 'NOT_CONFIGURED', environment: row.configuration?.environment ?? null, health: row.simulated ? 'AVAILABLE' : row.configuration?.enabled ? 'UNKNOWN' : 'NOT_CONFIGURED', simulated: row.simulated, countries: row.configuration?.enabledCountries ?? [], capabilities: row.capabilities, productCount: row.products.length, lastSuccessfulOperation: row.operations.find(operation => operation.status === 'SUCCEEDED')?.updatedAt ?? null, lastFailedOperation: row.operations.find(operation => operation.status !== 'SUCCEEDED')?.updatedAt ?? null }));
+  };
+  app.get('/health/providers', async () => ({ providers: await providerSummary() }));
   app.get('/health/ready', async (_request, reply) => {
     try { await Promise.all([db.$queryRaw`SELECT 1`, redis.ping()]); return { status: 'ready' }; }
     catch { return reply.status(503).send({ status: 'unavailable' }); }
@@ -126,6 +131,34 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
   app.get('/api/v1/me', protectedRoute, async request => publicUser(await db.user.findUniqueOrThrow({ where: { id: request.user.sub } })));
   app.get('/api/v1/plans', async () => db.plan.findMany({ where: { enabled: true }, orderBy: { priceCents: 'asc' } }));
   if (config.NODE_ENV !== 'production') {
+    app.get('/api/v1/admin/providers', providerSummary);
+    app.get('/api/v1/admin/providers/:providerId/coverage/HT', async (request, reply) => {
+      const { providerId } = z.object({ providerId: z.string().min(1) }).parse(request.params);
+      const row = await db.provider.findUnique({ where: { id: providerId }, include: { configuration: true, qualifications: { where: { countryCode: 'HT' } } } });
+      if (!row) return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Provider not found.' } });
+      const q = row.qualifications[0];
+      return { providerId, countryCode: 'HT', status: row.simulated ? 'SIMULATED' : row.configuration?.enabled ? 'CONFIGURED' : 'NOT_CONFIGURED', simulated: row.simulated, customerAvailabilityGuaranteed: false, qualification: q ? { haitiSupported: q.haitiSupported, networkNames: q.networkNames, lte4g: q.lte4g, fiveG: q.fiveG, persistentEsim: q.persistentEsim, topUpSameEsim: q.topUpSameEsim, packageReplacement: q.packageReplacement, usageApi: q.usageApi, usageWebhook: q.usageWebhook, hotspotTetheringPolicy: q.hotspotPolicy, throttlingFup: q.throttlingFup, packageExpirationBehavior: q.packageExpirationBehavior, activationMethod: q.activationMethod, qrInstallation: q.qrInstallation, manualInstallation: q.manualInstallation, webhookAuthentication: q.webhookAuthentication, idempotencySupport: q.idempotencySupport, reconciliationSupport: q.reconciliationSupport, failedProvisioningRefundBehavior: q.failedProvisioningRefundBehavior, sandboxAvailable: q.sandboxAvailable, productionAvailable: q.productionAvailable, commercialMinimums: q.commercialMinimums, wholesaleCurrency: q.wholesaleCurrency } : null };
+    });
+    app.get('/api/v1/admin/provider-products', async () => {
+      const products = await db.providerProduct.findMany({ include: { provider: { select: { id: true, displayName: true, simulated: true } }, mappings: { where: { active: true }, include: { plan: { select: { id: true, name: true, priceCents: true, currency: true } } } } }, orderBy: [{ countryCode: 'asc' }, { name: 'asc' }] });
+      return products.map(product => ({ id: product.id, providerId: product.providerId, providerName: product.provider.displayName, providerProductId: product.providerProductId, countryCode: product.countryCode, name: product.name, dataGb: product.dataGb, durationDays: product.durationDays, simulated: product.simulated, wholesalePriceCents: product.wholesalePriceCents, wholesaleCurrency: product.wholesaleCurrency, mappings: product.mappings.map(mapping => ({ planId: mapping.plan.id, planName: mapping.plan.name, retailPriceCents: mapping.plan.priceCents, retailCurrency: mapping.plan.currency, estimatedGrossMarginCents: product.wholesalePriceCents !== null && (!product.wholesaleCurrency || product.wholesaleCurrency === mapping.plan.currency) ? mapping.plan.priceCents - product.wholesalePriceCents : null })) }));
+    });
+    app.get('/api/v1/admin/plan-mappings', async () => db.planProviderMapping.findMany({ include: { plan: { select: { id: true, name: true, priceCents: true, currency: true } }, provider: { select: { id: true, displayName: true } }, product: { select: { id: true, providerProductId: true, name: true, countryCode: true } }, audits: { orderBy: { changedAt: 'desc' }, take: 10 } }, orderBy: [{ planId: 'asc' }, { version: 'desc' }] }));
+    app.post('/api/v1/admin/plans/:planId/mappings', async request => {
+      const { planId } = z.object({ planId: z.string().min(1) }).parse(request.params);
+      const { providerId, productRecordId } = z.object({ providerId: z.string().min(1), productRecordId: z.string().uuid() }).strict().parse(request.body);
+      return db.$transaction(async tx => {
+        const product = await tx.providerProduct.findFirst({ where: { id: productRecordId, providerId, enabled: true } });
+        if (!product || !await tx.plan.findUnique({ where: { id: planId } })) throw new AppError(404, 'NOT_FOUND', 'Plan or provider product not found.');
+        const prior = await tx.planProviderMapping.findFirst({ where: { planId, providerId, active: true } });
+        const version = (await tx.planProviderMapping.aggregate({ where: { planId, providerId }, _max: { version: true } }))._max.version ?? 0;
+        if (prior?.providerProductId === product.id) return prior;
+        if (prior) await tx.planProviderMapping.update({ where: { id: prior.id }, data: { active: false } });
+        const mapping = await tx.planProviderMapping.create({ data: { planId, providerId, providerProductId: product.id, version: version + 1 }, include: { product: true } });
+        await tx.providerMappingAudit.create({ data: { mappingId: mapping.id, planId, providerId, priorProductRecordId: prior?.providerProductId ?? null, newProductRecordId: product.id, version: mapping.version, actor: 'development-admin' } });
+        return mapping;
+      });
+    });
     app.get('/api/v1/admin/provider-operations/summary', async () => {
       const [pending, failed, issues, providerRow] = await Promise.all([
         db.providerOperation.count({ where: { status: { in: ['PENDING', 'RUNNING', 'RETRYABLE_FAILURE'] } } }),
@@ -173,9 +206,9 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
   });
   app.post('/api/v1/subscriptions/:id/renew', protectedRoute, async request => {
     const subscriptionId = idSchema.parse((request.params as { id: string }).id);
-    const subscription = await db.subscription.findFirst({ where: { id: subscriptionId, userId: request.user.sub }, include: { plan: { include: { providerMappings: { where: { providerId: provider.id, active: true }, include: { product: true } } } }, esim: true } });
+    const subscription = await db.subscription.findFirst({ where: { id: subscriptionId, userId: request.user.sub }, include: { plan: true, esim: true } });
     if (!subscription) notFound();
-    if (subscription.state !== 'ACTIVE' || !provider.capabilities.persistentEsim || !provider.capabilities.topUp || !subscription.esim?.providerReference || subscription.esim.state !== 'ACTIVE' || !subscription.plan.providerMappings[0]?.product.enabled) throw new AppError(409, 'RENEWAL_UNAVAILABLE', 'Monthly renewal is not available for this plan right now.');
+    if (subscription.state !== 'ACTIVE' || !provider.capabilities.persistentEsim || !provider.capabilities.topUp || !subscription.esim?.providerReference || subscription.esim.state !== 'ACTIVE' || subscription.providerIdSnapshot !== provider.id || !subscription.providerProductIdSnapshot) throw new AppError(409, 'RENEWAL_UNAVAILABLE', 'Monthly renewal is not available for this plan right now.');
     const periodStart = subscription.periodEnd && subscription.periodEnd > new Date() ? subscription.periodEnd : new Date();
     const periodEnd = new Date(periodStart.getTime() + subscription.plan.durationDays * 86_400_000);
     const idempotencyKey = `renewal:${subscription.id}:${periodStart.toISOString()}`;

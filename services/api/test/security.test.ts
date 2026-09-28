@@ -25,6 +25,11 @@ describe('security boundaries', () => {
   it('rejects unknown providers instead of silently falling back', () => { expect(() => createEsimProvider('unknown', 'test')).toThrow(); });
   it('rejects Stripe live mode credentials', () => { expect(() => readConfig({ ...environment(), STRIPE_SECRET_KEY: ['sk', 'live', 'rejected'].join('_') })).toThrow('Only Stripe test'); });
   it('allows mock billing without Stripe credentials', () => { expect(readConfig(environment()).BILLING_MODE).toBe('mock'); });
+  it('accepts only secret references and rejects provider credential values', () => {
+    expect(readConfig({ ...environment(), ESIM_API_KEY_REF: 'PROVIDER_API_KEY', ESIM_WEBHOOK_SECRET_REF: 'secret://konekte/provider/webhook' }).ESIM_API_KEY_REF).toBe('PROVIDER_API_KEY');
+    expect(() => readConfig({ ...environment(), ESIM_API_KEY_REF: 'sk_live_sensitive-provider-secret' })).toThrow('secret references');
+    expect(() => readConfig({ ...environment(), ESIM_PROVIDER: 'template', ESIM_PROVIDER_ENABLED: 'true' })).toThrow('incomplete');
+  });
   it('requires a complete Stripe test configuration', () => { expect(() => readConfig({ ...environment(), BILLING_MODE: 'stripe_test' })).toThrow('incomplete'); });
   it('returns deterministic, noninstallable mock data across adapter instances', async () => {
     const request = { idempotencyKey: 'a-test-request', planCode: 'basic', dataGb: 10, durationDays: 30 };
