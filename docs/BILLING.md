@@ -2,7 +2,7 @@
 
 `BILLING_MODE=mock` requires no external credentials and never charges money. `BILLING_MODE=stripe_test` accepts only a Stripe test secret plus a webhook signing secret supplied through the environment. Live Stripe credentials and live webhook events are rejected. Production startup is blocked.
 
-All plans use **PLACEHOLDER_PRICING**. Checkout is a one-time purchase of a 30-day allowance, not a recurring Stripe subscription. Subscription is the application entitlement model. No renewal, refunds, chargeback processing or live billing is implemented.
+All plans use **PLACEHOLDER_PRICING**. Initial checkout is a one-time purchase of a 30-day allowance. A development renewal checkout can charge the existing placeholder amount; only a verified Stripe test event can queue a provider top-up. Package assignment and subscription-period extension are recorded after provider confirmation. This is not a Stripe subscription or a claim of live recurring service. Refunds and chargeback processing are not implemented.
 
 ## Checkout
 

@@ -4,16 +4,21 @@
 
 ## Contract
 
-An adapter supplies:
+An adapter supplies `getCoverage`, `listProducts`, `provision`, `getStatus`, `activate`, `topUp`, `getUsage`, `suspend`, `resume`, `terminate`, and `reconcileByIdempotencyKey`, plus explicit capability flags. The contract includes persistent-profile, top-up, auto-renew, usage, QR/manual setup, activation, hotspot, voice, SMS, phone-number, and simulation support.
 
-- `id` and capabilities: data, QR/manual setup, usage, activation, voice, SMS, simulation.
-- `provision({ idempotencyKey, planCode, dataGb, durationDays })`: stable provider reference and install data.
-- `activate(reference)`: trusted provider activation state.
-- `usage(reference)`: byte measurement and timestamp.
+Konekte plan IDs remain the customer-facing identifiers. `PlanProviderMapping` joins each plan and provider to a `ProviderProduct`; provider product IDs are only resolved by server-side workflows and are never returned in plan DTOs.
 
 Adapters must guarantee durable idempotency for the complete retry/reconciliation period, including process restarts and ambiguous network timeouts. A real adapter needs its own plan mapping, HTTP timeouts, safe error mapping, authenticated callback handling and reconciliation by the idempotency key. If a supplier cannot support this, build a reconciliation layer before enabling it. A provider timeout must never trigger a blind purchase under a new key.
 
-The mock uses deterministic references, `mock.invalid` manual setup address, and `KONEKTE-DEMO-NOT-INSTALLABLE:` QR data. It never emits valid LPA data or phone numbers. Example usage is a fixed 256,000,000 bytes, not measured network traffic. Mock ACTIVE is explicitly a simulation.
+The mock uses deterministic references, `mock.invalid` manual setup address, and non-installable QR data. It never emits valid LPA data or phone numbers. Example usage is a fixed 256,000,000 bytes, not measured network traffic. Mock ACTIVE is explicitly a simulation. Its catalog and coverage values are mock values, not a coverage promise.
+
+## Operations and renewal
+
+`ProviderOperation` records operation type, Konekte entity, provider request/reference, unique idempotency key, attempts, state and a safe error code. States are `PENDING`, `RUNNING`, `SUCCEEDED`, `RETRYABLE_FAILURE`, `FAILED`, and `RECONCILIATION_REQUIRED`. Provider webhooks retain raw bytes for an injected verifier, persist unique provider/event IDs, and acknowledge unsupported event types without interpreting vendor-specific names.
+
+Reconciliation creates review flags for paid purchases without eSIMs, state disagreements, missing renewal assignments, stale usage and unknown provider references. It never changes customer or provider state automatically. The development admin exposes operation summaries and open flags without blind retry controls.
+
+Monthly renewal is initiated through an authenticated checkout. A verified payment creates one idempotent top-up operation, and the existing eSIM is reused only when both persistent profiles and top-ups are supported. The next subscription period is written only after the provider confirms package assignment. Provider auto-renew is a separate capability and is not assumed. Renewal support requires an active local eSIM, an active mapping, and matching provider capabilities.
 
 ## Durable provisioning
 

@@ -1,7 +1,7 @@
 name: konekte-dev
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-bookworm
     environment:
       POSTGRES_DB: konekte
       POSTGRES_USER: ${POSTGRES_USER:?Run pnpm dev:setup}
@@ -14,7 +14,7 @@ services:
       timeout: 3s
       retries: 20
   postgres-test:
-    image: postgres:17-alpine
+    image: postgres:17-bookworm
     profiles: [test]
     environment:
       POSTGRES_DB: konekte_test
@@ -28,7 +28,7 @@ services:
       timeout: 3s
       retries: 20
   redis:
-    image: redis:7-alpine
+    image: redis:7-bookworm
     ports: ["127.0.0.1:56379:6379"]
     command: [redis-server, --save, "", --appendonly, "no"]
     healthcheck:

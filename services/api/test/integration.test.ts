@@ -5,7 +5,7 @@ import { Redis } from 'ioredis';
 import Stripe from 'stripe';
 import type { FastifyInstance } from 'fastify';
 import type { Checkout, Device, Esim, Subscription, Tokens, Usage } from '@konekte/shared-types';
-import { MockEsimProvider } from '@konekte/esim-provider-sdk';
+import { MockEsimProvider, MockProviderWebhookVerifier } from '@konekte/esim-provider-sdk';
 import { buildApp } from '../src/app.js';
 import { MockBillingService } from '../src/billing.js';
 import { readConfig } from '../src/config.js';
@@ -17,6 +17,7 @@ const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 1 });
 const signingSecret = randomBytes(32).toString('hex');
 const billing = new MockBillingService(signingSecret);
 const provider = new MockEsimProvider();
+const providerVerifier = new MockProviderWebhookVerifier(randomBytes(32).toString('hex'));
 const config = readConfig({ ...process.env, NODE_ENV: 'test', ACCESS_TOKEN_SECRET: randomBytes(48).toString('hex'), ACTIVATION_ENCRYPTION_KEY: randomBytes(32).toString('hex') });
 let app: FastifyInstance;
 let workflow: Workflows;
@@ -58,11 +59,11 @@ async function step(tokens: Tokens, id: string, action: string) {
   return app.inject({ method: 'POST', url: `/api/v1/esims/${id}/installation`, headers: auth(tokens), payload: { action } });
 }
 beforeAll(async () => {
-  const built = await buildApp({ db, redis, provider, billing, config }); app = built.app; workflow = built.workflow; await app.ready();
+  const built = await buildApp({ db, redis, provider, providerWebhookVerifier: providerVerifier, billing, config }); app = built.app; workflow = built.workflow; await app.ready();
 });
 beforeEach(async () => {
   // Guard above prevents accidental truncation of development or production databases.
-  await db.$executeRawUnsafe('TRUNCATE TABLE "Usage", "ProvisioningJob", "Esim", "WebhookEvent", "Payment", "Subscription", "Device", "Session", "User", "Plan" CASCADE');
+  await db.$executeRawUnsafe('TRUNCATE TABLE "RenewalWebhookEvent", "RenewalPayment", "ProviderWebhookEvent", "ProviderOperation", "ReconciliationIssue", "PlanProviderMapping", "ProviderProduct", "Usage", "ProvisioningJob", "Esim", "WebhookEvent", "Payment", "Subscription", "Device", "Session", "User", "Plan" CASCADE');
   const keys = await redis.keys('konekte:test:rate:*'); if (keys.length) await redis.del(...keys);
   vi.restoreAllMocks(); await seedPlans(db);
 });
@@ -122,6 +123,71 @@ describe('auth and catalog', () => {
     expect((await app.inject({ url: '/health/ready' })).json()).toEqual({ status: 'ready' });
     vi.spyOn(redis, 'ping').mockRejectedValueOnce(new Error('secret-internal-error'));
     const down = await app.inject({ url: '/health/ready' }); expect(down.statusCode).toBe(503); expect(down.body).not.toContain('secret-internal-error');
+  });
+});
+describe('provider operations and renewals', () => {
+  it('keeps provider product IDs out of the public plan catalog while storing an internal mapping', async () => {
+    const response = await app.inject({ url: '/api/v1/plans' });
+    expect(response.statusCode).toBe(200); expect(response.body).not.toContain('mock-basic-10gb');
+    const mapping = await db.planProviderMapping.findUniqueOrThrow({ where: { planId_providerId: { planId: 'basic', providerId: 'mock' } }, include: { product: true } });
+    expect(mapping.product.providerProductId).toBe('mock-basic-10gb');
+  });
+  it('records provider operation idempotency with a unique key', async () => {
+    const p = await provisioned();
+    const operation = await db.providerOperation.findUniqueOrThrow({ where: { idempotencyKey: `provision:${p.checkout.subscriptionId}` } });
+    expect(operation.status).toBe('SUCCEEDED'); expect(operation.attempts).toBe(1);
+    await expect(db.providerOperation.create({ data: { operationType: 'PROVISION', entityType: 'ESIM', entityId: p.esim.id, providerId: 'mock', idempotencyKey: operation.idempotencyKey } })).rejects.toMatchObject({ code: 'P2002' });
+  });
+  it('renews an existing persistent eSIM with exactly one package assignment after verified payment', async () => {
+    const p = await provisioned();
+    for (const action of ['start-install', 'confirm-install', 'activate']) await step(p.tokens, p.esim.id, action);
+    const created = await app.inject({ method: 'POST', url: `/api/v1/subscriptions/${p.checkout.subscriptionId}/renew`, headers: auth(p.tokens) });
+    expect(created.statusCode).toBe(200);
+    const renewalId = created.json<{ renewalPaymentId: string }>().renewalPaymentId;
+    const renewal = await db.renewalPayment.findUniqueOrThrow({ where: { id: renewalId } });
+    const event = billing.signedEvent({ paymentId: renewal.id, amountCents: renewal.amountCents, currency: renewal.currency, planName: 'Konekte Basic' }, 'success', 'renewal-success');
+    expect((await webhook(event.body, event.signature)).statusCode).toBe(200);
+    expect((await webhook(event.body, event.signature)).json()).toMatchObject({ received: true });
+    const op = await db.providerOperation.findUniqueOrThrow({ where: { idempotencyKey: renewal.idempotencyKey } });
+    expect(op).toMatchObject({ status: 'SUCCEEDED', operationType: 'RENEWAL_PACKAGE' });
+    expect(await db.providerOperation.count({ where: { idempotencyKey: renewal.idempotencyKey } })).toBe(1);
+    expect(op.attempts).toBe(1);
+  });
+  it('stores a safe retryable provider operation when renewal package assignment fails', async () => {
+    const p = await provisioned();
+    for (const action of ['start-install', 'confirm-install', 'activate']) await step(p.tokens, p.esim.id, action);
+    const created = await app.inject({ method: 'POST', url: `/api/v1/subscriptions/${p.checkout.subscriptionId}/renew`, headers: auth(p.tokens) });
+    const renewal = await db.renewalPayment.findUniqueOrThrow({ where: { id: created.json<{ renewalPaymentId: string }>().renewalPaymentId } });
+    vi.spyOn(provider, 'topUp').mockRejectedValueOnce(new Error('provider secret detail'));
+    const event = billing.signedEvent({ paymentId: renewal.id, amountCents: renewal.amountCents, currency: renewal.currency, planName: 'Konekte Basic' }, 'success', 'renewal-failed-provider');
+    await webhook(event.body, event.signature);
+    expect(await db.providerOperation.findUniqueOrThrow({ where: { idempotencyKey: renewal.idempotencyKey } })).toMatchObject({ status: 'RETRYABLE_FAILURE', safeErrorCode: 'PACKAGE_ASSIGNMENT_FAILED' });
+  });
+  it('flags stale usage and provider state discrepancies without correcting them', async () => {
+    const p = await provisioned();
+    await db.esim.update({ where: { id: p.esim.id }, data: { state: 'ACTIVE' } });
+    expect(await workflow.reconcile()).toBeGreaterThan(0);
+    expect(await db.reconciliationIssue.count({ where: { entityId: p.esim.id, status: 'OPEN' } })).toBeGreaterThan(0);
+    expect((await db.esim.findUniqueOrThrow({ where: { id: p.esim.id } })).state).toBe('ACTIVE');
+  });
+  it('deduplicates signed eSIM webhook events and flags unknown references for review', async () => {
+    const body = Buffer.from(JSON.stringify({ eventId: 'provider-event-1', type: 'unrecognized.mock.event', reference: 'unknown-ref' }));
+    const signature = providerVerifier.sign(body);
+    const request = () => app.inject({ method: 'POST', url: '/api/v1/webhooks/esim/mock', headers: { 'content-type': 'application/json', 'x-esim-signature': signature }, payload: body });
+    expect((await request()).json()).toMatchObject({ received: true, duplicate: false });
+    expect((await request()).json()).toMatchObject({ received: true, duplicate: true });
+    expect(await db.reconciliationIssue.count({ where: { kind: 'UNKNOWN_PROVIDER_ESIM' } })).toBe(1);
+  });
+  it('does not start a renewal when a provider lacks persistent top-up capability', async () => {
+    const p = await provisioned();
+    for (const action of ['start-install', 'confirm-install', 'activate']) await step(p.tokens, p.esim.id, action);
+    Object.assign(provider.capabilities, { persistentEsim: false, topUp: false });
+    try {
+      expect((await app.inject({ method: 'POST', url: `/api/v1/subscriptions/${p.checkout.subscriptionId}/renew`, headers: auth(p.tokens) })).statusCode).toBe(409);
+      expect(await db.renewalPayment.count()).toBe(0);
+    } finally {
+      Object.assign(provider.capabilities, { persistentEsim: true, topUp: true });
+    }
   });
 });
 describe('checkout and verified payment', () => {

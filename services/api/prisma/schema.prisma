@@ -50,6 +50,38 @@ enum JobState {
   COMPLETE
   FAILED
 }
+enum ProviderOperationState {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  RETRYABLE_FAILURE
+  FAILED
+  RECONCILIATION_REQUIRED
+}
+enum ProviderOperationType {
+  PROVISION
+  STATUS
+  ACTIVATE
+  TOP_UP
+  USAGE
+  SUSPEND
+  RESUME
+  TERMINATE
+  RECONCILE
+  RENEWAL_PACKAGE
+}
+enum ReconciliationKind {
+  PAID_BUT_NOT_PROVISIONED
+  LOCAL_ACTIVE_PROVIDER_INACTIVE
+  PROVIDER_ACTIVE_LOCAL_PENDING
+  RENEWAL_PAID_PACKAGE_NOT_ASSIGNED
+  USAGE_SYNC_STALE
+  UNKNOWN_PROVIDER_ESIM
+}
+enum ReconciliationStatus {
+  OPEN
+  RESOLVED
+}
 model User {
   id           String         @id @default(uuid()) @db.Uuid
   email        String         @unique
@@ -95,6 +127,7 @@ model Plan {
   pricingLabel String @default("PLACEHOLDER_PRICING")
   enabled      Boolean @default(true)
   subscriptions Subscription[]
+  providerMappings PlanProviderMapping[]
 }
 model Subscription {
   id         String @id @default(uuid()) @db.Uuid
@@ -109,6 +142,9 @@ model Subscription {
   expiresAt  DateTime?
   payment    Payment?
   esim       Esim?
+  periodStart DateTime?
+  periodEnd DateTime?
+  renewals RenewalPayment[]
   @@index([userId])
 }
 model Payment {
@@ -170,4 +206,107 @@ model Usage {
   measuredAt DateTime
   simulated  Boolean
   @@index([esimId, measuredAt])
+}
+model Provider {
+  id String @id
+  displayName String
+  enabled Boolean @default(false)
+  simulated Boolean @default(true)
+  healthStatus String @default("UNKNOWN")
+  capabilities Json
+  products ProviderProduct[]
+  mappings PlanProviderMapping[]
+  operations ProviderOperation[]
+  webhookEvents ProviderWebhookEvent[]
+  reconciliationIssues ReconciliationIssue[]
+}
+model ProviderProduct {
+  id String @id @default(uuid()) @db.Uuid
+  providerId String
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerProductId String
+  countryCode String
+  name String
+  dataGb Int
+  durationDays Int
+  simulated Boolean @default(true)
+  enabled Boolean @default(true)
+  mappings PlanProviderMapping[]
+  @@unique([providerId, providerProductId, countryCode])
+}
+model PlanProviderMapping {
+  id String @id @default(uuid()) @db.Uuid
+  planId String
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  providerId String
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  providerProductId String @db.Uuid
+  product ProviderProduct @relation(fields: [providerProductId], references: [id], onDelete: Cascade)
+  active Boolean @default(true)
+  @@unique([planId, providerId])
+}
+model ProviderOperation {
+  id String @id @default(uuid()) @db.Uuid
+  operationType ProviderOperationType
+  entityType String
+  entityId String
+  providerId String
+  provider Provider @relation(fields: [providerId], references: [id])
+  providerRequestId String?
+  providerReferenceId String?
+  idempotencyKey String @unique
+  status ProviderOperationState @default(PENDING)
+  attempts Int @default(0)
+  safeErrorCode String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([status, createdAt])
+  @@index([entityType, entityId])
+}
+model ProviderWebhookEvent {
+  id String @id @default(uuid()) @db.Uuid
+  providerId String
+  provider Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  eventId String
+  eventType String
+  providerReferenceId String?
+  processedAt DateTime @default(now())
+  @@unique([providerId, eventId])
+}
+model ReconciliationIssue {
+  id String @id @default(uuid()) @db.Uuid
+  fingerprint String @unique
+  kind ReconciliationKind
+  entityType String
+  entityId String
+  providerId String?
+  provider Provider? @relation(fields: [providerId], references: [id])
+  status ReconciliationStatus @default(OPEN)
+  safeDetails String
+  detectedAt DateTime @default(now())
+  resolvedAt DateTime?
+  @@index([status, detectedAt])
+}
+model RenewalPayment {
+  id String @id @default(uuid()) @db.Uuid
+  subscriptionId String @db.Uuid
+  subscription Subscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  checkoutReference String @unique
+  idempotencyKey String @unique
+  amountCents Int
+  currency String
+  mode String
+  state PaymentState @default(PENDING)
+  periodStart DateTime
+  periodEnd DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  events RenewalWebhookEvent[]
+}
+model RenewalWebhookEvent {
+  id String @id
+  type String
+  renewalPaymentId String @db.Uuid
+  renewalPayment RenewalPayment @relation(fields: [renewalPaymentId], references: [id], onDelete: Cascade)
+  processedAt DateTime @default(now())
 }

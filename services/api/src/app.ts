@@ -8,7 +8,7 @@ import type { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { z, ZodError } from 'zod';
 import { checkoutSchema, credentialsSchema, deviceSchema, idempotencySchema, idSchema, installationActionSchema, mockPaymentSchema, refreshSchema, registerSchema } from '@konekte/shared-validation';
-import type { EsimProvider } from '@konekte/esim-provider-sdk';
+import type { EsimProvider, ProviderWebhookVerifier } from '@konekte/esim-provider-sdk';
 import type { Config } from './config.js';
 import { AppError, notFound } from './errors.js';
 import { decrypt, hashPassword, hashToken, newRefreshToken, verifyPassword } from './crypto.js';
@@ -26,7 +26,7 @@ function safeDiagnosticText(value: string) {
     .replace(/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, '[redacted token]')
     .replace(/((?:password|token|secret|activation|install|code)\s*[=:]\s*)[^\s,;]+/gi, '$1[redacted]');
 }
-export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider: EsimProvider; billing: BillingService; config: Config; logger?: boolean; diagnosticSink?: (entry: Record<string, unknown>) => void }) {
+export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider: EsimProvider; providerWebhookVerifier?: ProviderWebhookVerifier; billing: BillingService; config: Config; logger?: boolean; diagnosticSink?: (entry: Record<string, unknown>) => void }) {
   const { db, redis, provider, billing, config } = deps;
   const workflow = new Workflows(db, provider, billing, config);
   const app = Fastify({ logger: deps.logger ? { level: 'info', redact: ['req.headers.authorization', 'req.headers.cookie', 'req.body', 'res.body'] } : false, disableRequestLogging: true, bodyLimit: 64 * 1024, trustProxy: false });
@@ -125,6 +125,23 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
   });
   app.get('/api/v1/me', protectedRoute, async request => publicUser(await db.user.findUniqueOrThrow({ where: { id: request.user.sub } })));
   app.get('/api/v1/plans', async () => db.plan.findMany({ where: { enabled: true }, orderBy: { priceCents: 'asc' } }));
+  if (config.NODE_ENV !== 'production') {
+    app.get('/api/v1/admin/provider-operations/summary', async () => {
+      const [pending, failed, issues, providerRow] = await Promise.all([
+        db.providerOperation.count({ where: { status: { in: ['PENDING', 'RUNNING', 'RETRYABLE_FAILURE'] } } }),
+        db.providerOperation.count({ where: { status: { in: ['FAILED', 'RECONCILIATION_REQUIRED'] } } }),
+        db.reconciliationIssue.count({ where: { status: 'OPEN' } }),
+        db.provider.findUnique({ where: { id: provider.id }, select: { id: true, displayName: true, enabled: true, simulated: true, healthStatus: true, capabilities: true } })
+      ]);
+      return { provider: providerRow, pendingOperations: pending, failedOperations: failed, openReconciliationIssues: issues };
+    });
+    app.get('/api/v1/admin/provider-operations', async request => {
+      const query = z.object({ status: z.enum(['PENDING', 'RUNNING', 'SUCCEEDED', 'RETRYABLE_FAILURE', 'FAILED', 'RECONCILIATION_REQUIRED']).optional() }).strict().parse(request.query);
+      return db.providerOperation.findMany({ where: { providerId: provider.id, status: query.status }, orderBy: { updatedAt: 'desc' }, take: 100 });
+    });
+    app.get('/api/v1/admin/reconciliation-issues', async () => db.reconciliationIssue.findMany({ where: { status: 'OPEN' }, orderBy: { detectedAt: 'desc' }, take: 100 }));
+    app.post('/api/v1/admin/reconcile', async () => ({ flagged: await workflow.reconcile(), corrected: 0 }));
+  }
   app.get('/api/v1/devices', protectedRoute, async request => db.device.findMany({ where: { userId: request.user.sub }, orderBy: { createdAt: 'desc' }, take: 100 }));
   app.post('/api/v1/devices', protectedRoute, async (request, reply) => {
     const body = deviceSchema.parse(request.body);
@@ -152,7 +169,23 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
   }
   app.get('/api/v1/subscriptions', protectedRoute, async request => {
     const subscriptions = await db.subscription.findMany({ where: { userId: request.user.sub }, include: { plan: true, payment: true, esim: true }, orderBy: { createdAt: 'desc' }, take: 100 });
-    return subscriptions.map(s => ({ id: s.id, state: s.state, plan: s.plan, payment: s.payment ? { id: s.payment.id, state: s.payment.state, mode: s.payment.mode, checkoutUrl: s.payment.checkoutUrl } : null, esim: s.esim ? publicEsim(s.esim) : null }));
+    return subscriptions.map(s => ({ id: s.id, state: s.state, plan: s.plan, periodStart: s.periodStart?.toISOString() ?? null, periodEnd: s.periodEnd?.toISOString() ?? null, payment: s.payment ? { id: s.payment.id, state: s.payment.state, mode: s.payment.mode, checkoutUrl: s.payment.checkoutUrl } : null, esim: s.esim ? publicEsim(s.esim) : null }));
+  });
+  app.post('/api/v1/subscriptions/:id/renew', protectedRoute, async request => {
+    const subscriptionId = idSchema.parse((request.params as { id: string }).id);
+    const subscription = await db.subscription.findFirst({ where: { id: subscriptionId, userId: request.user.sub }, include: { plan: { include: { providerMappings: { where: { providerId: provider.id, active: true }, include: { product: true } } } }, esim: true } });
+    if (!subscription) notFound();
+    if (subscription.state !== 'ACTIVE' || !provider.capabilities.persistentEsim || !provider.capabilities.topUp || !subscription.esim?.providerReference || subscription.esim.state !== 'ACTIVE' || !subscription.plan.providerMappings[0]?.product.enabled) throw new AppError(409, 'RENEWAL_UNAVAILABLE', 'Monthly renewal is not available for this plan right now.');
+    const periodStart = subscription.periodEnd && subscription.periodEnd > new Date() ? subscription.periodEnd : new Date();
+    const periodEnd = new Date(periodStart.getTime() + subscription.plan.durationDays * 86_400_000);
+    const idempotencyKey = `renewal:${subscription.id}:${periodStart.toISOString()}`;
+    let renewal = await db.renewalPayment.findUnique({ where: { idempotencyKey } });
+    if (!renewal) {
+      const id = randomUUID();
+      const checkout = await billing.createCheckout({ paymentId: id, amountCents: subscription.plan.priceCents, currency: subscription.plan.currency, planName: subscription.plan.name });
+      renewal = await db.renewalPayment.create({ data: { id, subscriptionId: subscription.id, idempotencyKey, checkoutReference: checkout.reference, amountCents: subscription.plan.priceCents, currency: subscription.plan.currency, mode: billing.mode, periodStart, periodEnd } });
+    }
+    return { renewalPaymentId: renewal.id, state: renewal.state, mode: billing.mode };
   });
   app.get('/api/v1/esims/capabilities', protectedRoute, async () => provider.capabilities);
   app.get('/api/v1/esims', protectedRoute, async request => (await db.esim.findMany({ where: { subscription: { userId: request.user.sub } }, take: 100 })).map(publicEsim));
@@ -181,10 +214,11 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
     const result = [];
     for (const esim of esims) {
       if (!esim.providerReference || esim.provider !== provider.id || !['ACTIVE', 'EXPIRED'].includes(esim.state)) continue;
+      if (!provider.capabilities.usageReporting) throw new AppError(503, 'USAGE_UNAVAILABLE', 'Usage is unavailable for this service.');
       let snapshot = await db.usage.findFirst({ where: { esimId: esim.id }, orderBy: { measuredAt: 'desc' } });
       if (esim.state === 'ACTIVE' && (!snapshot || Date.now() - snapshot.measuredAt.getTime() > 60_000)) {
         let usage;
-        try { usage = await provider.usage(esim.providerReference); }
+        try { usage = await provider.getUsage(esim.providerReference); }
         catch { throw new AppError(502, 'USAGE_UNAVAILABLE', 'Usage is unavailable. Please try again.'); }
         if (!Number.isSafeInteger(usage.usedBytes) || usage.usedBytes < 0) throw new AppError(502, 'USAGE_UNAVAILABLE', 'Usage is unavailable.');
         snapshot = await db.usage.create({ data: { esimId: esim.id, usedBytes: BigInt(usage.usedBytes), totalBytes: BigInt(esim.subscription.plan.dataGb) * 1_000_000_000n, measuredAt: usage.measuredAt, simulated: esim.simulated } });
@@ -202,6 +236,26 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
       const event = billing.verifyEvent(request.body, signature);
       if (event) await workflow.acceptPayment(event);
       return { received: true };
+    });
+    webhook.post('/api/v1/webhooks/esim/:provider', async request => {
+      const providerName = (request.params as { provider: string }).provider;
+      if (providerName !== provider.id || !deps.providerWebhookVerifier || !Buffer.isBuffer(request.body)) throw new AppError(404, 'WEBHOOK_UNAVAILABLE', 'This update could not be accepted.');
+      const signature = request.headers['x-esim-signature'];
+      if (typeof signature !== 'string') throw new AppError(400, 'INVALID_SIGNATURE', 'This update could not be verified.');
+      const event = deps.providerWebhookVerifier.verify(request.body, signature);
+      if (!event) throw new AppError(400, 'INVALID_SIGNATURE', 'This update could not be verified.');
+      try {
+        await db.providerWebhookEvent.create({ data: { providerId: provider.id, eventId: event.eventId, eventType: event.type, providerReferenceId: event.reference } });
+      } catch (error) {
+        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') return { received: true, duplicate: true };
+        throw error;
+      }
+      if (event.reference && !await db.esim.findFirst({ where: { provider: provider.id, providerReference: event.reference } })) {
+        const fingerprint = `UNKNOWN_PROVIDER_ESIM:${event.reference}`;
+        await db.reconciliationIssue.upsert({ where: { fingerprint }, create: { fingerprint, kind: 'UNKNOWN_PROVIDER_ESIM', entityType: 'PROVIDER_REFERENCE', entityId: 'unknown', providerId: provider.id, safeDetails: 'Verified provider event references an unknown local eSIM.' }, update: { status: 'OPEN', resolvedAt: null } });
+      }
+      // Event names are provider-specific and intentionally not interpreted here.
+      return { received: true, duplicate: false };
     });
   });
   return { app, workflow };

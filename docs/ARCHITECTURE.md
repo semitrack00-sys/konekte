@@ -30,6 +30,10 @@ The database is authoritative. Redis is for distributed request limiting, not pa
 - Payment → WebhookEvent: unique event IDs, verified transitions and durable deduplication.
 - Subscription → Esim → ProvisioningJob: one eSIM and one durable job per purchase.
 - Esim → Usage: timestamped byte measurements, allowance, simulation flag.
+- Provider → ProviderProduct → PlanProviderMapping: internal plan-to-provider product selection; provider product identifiers remain server-side.
+- Provider → ProviderOperation: operation history with idempotency, safe error code, attempts and explicit lifecycle state.
+- Provider → ProviderWebhookEvent: deduplicated verified provider events.
+- RenewalPayment and ReconciliationIssue: renewal receipts and non-destructive review flags.
 
 Unique keys and transactions enforce these relationships. PostgreSQL stores byte counters as BIGINT; API DTOs use safe JS numbers within the current 50 GB maximum.
 
@@ -48,12 +52,15 @@ All customer routes require bearer authentication unless marked public. Response
 | `/api/v1/checkout` | POST create/reuse checkout; UUID `Idempotency-Key` required |
 | `/api/v1/checkout/:paymentId/simulate` | POST owner-only signed payment simulation, mock mode only |
 | `/api/v1/subscriptions` | GET own subscriptions, payment and safe eSIM summaries |
+| `/api/v1/subscriptions/:id/renew` | POST start an owner-scoped renewal checkout when persistent top-up capability is present |
 | `/api/v1/esims` | GET own safe eSIM summaries |
 | `/api/v1/esims/capabilities` | GET current adapter capability flags |
 | `/api/v1/esims/:id/installation` | GET decrypted owner setup data; POST guarded mock practice action |
 | `/api/v1/esims/:id/retry` | POST requeue an exhausted, paid provisioning job |
 | `/api/v1/usage?esimId=...` | GET own usage; optional owner-scoped filter |
 | `/api/v1/webhooks/stripe` | POST signature-authenticated raw JSON webhook |
+| `/api/v1/webhooks/esim/:provider` | POST raw provider event through an injected signature verifier; event IDs are deduplicated |
+| `/api/v1/admin/provider-operations/*` | Development-only read views and manual reconciliation scan; no blind retries |
 
 Lists have a 100-record cap; pagination and support tooling are deferred. Client responses omit password hashes, session hashes, provider references and encrypted database fields.
 
@@ -61,10 +68,10 @@ Lists have a 100-record cap; pagination and support tooling are deferred. Client
 
 Payment `PENDING → SUCCEEDED` queues provisioning. `PENDING → FAILED` makes the subscription `PAST_DUE` and provisions nothing. A verified late success can recover failure. A late failure never reverses success. Subscription stays `PENDING` during setup and becomes `ACTIVE` only after the adapter confirms activation. In mock mode, this means simulated state only.
 
-Subscriptions have `PENDING`, `ACTIVE`, `PAST_DUE`, `SUSPENDED`, `CANCELING`, `CANCELED`, `EXPIRED`. The worker expires active subscriptions after their duration. Suspension, cancelation, renewal, refund and dispute workflows are reserved for later phases; enums alone do not implement them.
+Subscriptions have `PENDING`, `ACTIVE`, `PAST_DUE`, `SUSPENDED`, `CANCELING`, `CANCELED`, `EXPIRED`. The worker expires active subscriptions after their duration. Renewal package assignment checks persistent-profile and top-up capabilities, records an operation before calling the provider, and extends the period only after confirmed package assignment. Suspension, cancelation, refund and dispute customer workflows remain deferred.
 
 eSIM states: `CREATED`, `READY`, `INSTALLED`, `ACTIVE`, `SUSPENDED`, `EXPIRED`, `TERMINATED`, `ERROR`. Installation states: `NOT_CREATED`, `PROVISIONING`, `READY_TO_INSTALL`, `INSTALLING`, `INSTALLED`, `ACTIVATING`, `ACTIVE`, `FAILED`. Client practice steps are guarded and idempotent; skip-ahead transitions fail. `ACTIVATING` is transient within the activation transaction. Future asynchronous adapters need callback-based progression and reconciliation.
 
 ## Deliberate limits
 
-No real data connectivity, phone service, number assignment, coverage promise, subscription auto-renewal, refunds, admin privilege management, email delivery, password reset or production deployment exists here. Production is blocked even when an unknown provider name is supplied. Adding a real adapter requires implementing its contract and reviewing production readiness; changing an environment variable alone cannot enable production.
+No real data connectivity, phone service, number assignment, coverage promise, provider auto-renewal, refunds, production-grade admin privilege management, email delivery, password reset or production deployment exists here. Production is blocked even when an unknown provider name is supplied. Adding a real adapter requires implementing its contract and reviewing production readiness; changing an environment variable alone cannot enable production.
