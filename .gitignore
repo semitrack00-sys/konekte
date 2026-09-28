@@ -10,3 +10,6 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 services/api/.generated/
+
+pnpm.cmd
+provider-onboarding-backup.patch
