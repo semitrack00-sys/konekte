@@ -109,6 +109,11 @@ describe('auth and catalog', () => {
     expect(response.json().map((p: { priceCents: number }) => p.priceCents)).toEqual([999, 1499, 1999]);
     expect(response.json().map((p: { dataGb: number }) => p.dataGb)).toEqual([10, 30, 50]);
     for (const plan of response.json()) expect(plan).toMatchObject({ pricingLabel: 'PLACEHOLDER_PRICING', durationDays: 30 });
+    expect(response.body).not.toContain('wholesalePriceCents');
+    expect(response.body).not.toContain('wholesaleCurrency');
+    expect(response.body).not.toContain('estimatedGrossMargin');
+    expect(response.body).not.toContain('providerProductId');
+    expect(response.body).not.toContain('providerMapping');
   });
   it('requires authentication on every customer API group', async () => {
     for (const url of ['/api/v1/me', '/api/v1/devices', '/api/v1/subscriptions', '/api/v1/esims', '/api/v1/usage']) expect((await app.inject({ url })).statusCode).toBe(401);
@@ -150,6 +155,10 @@ describe('provider operations and renewals', () => {
     const historical = await db.subscription.findUniqueOrThrow({ where: { id: p.checkout.subscriptionId } });
     expect(historical.providerProductIdSnapshot).toBe(before.providerProductIdSnapshot);
     expect(historical.providerMappingVersion).toBe(1);
+    const next = await prepared();
+    const latest = await db.subscription.findUniqueOrThrow({ where: { id: next.checkout.subscriptionId } });
+    expect(latest.providerProductIdSnapshot).toBe('future-basic-v2');
+    expect(latest.providerMappingVersion).toBe(2);
     expect(await db.planProviderMapping.findMany({ where: { planId: 'basic', providerId: 'mock' }, orderBy: { version: 'asc' }, select: { version: true, active: true } })).toEqual([{ version: 1, active: false }, { version: 2, active: true }]);
     expect(await db.providerMappingAudit.count({ where: { planId: 'basic', providerId: 'mock', version: 2 } })).toBe(1);
   });
@@ -157,9 +166,25 @@ describe('provider operations and renewals', () => {
     await db.providerConfiguration.update({ where: { providerId: 'template' }, data: { apiKeyReference: 'PROVIDER_API_KEY', webhookSecretReference: 'PROVIDER_WEBHOOK_SECRET' } });
     const health = await app.inject({ url: '/health/providers' });
     expect(health.statusCode).toBe(200); expect(health.body).not.toContain('PROVIDER_API_KEY'); expect(health.body).not.toContain('PROVIDER_WEBHOOK_SECRET');
-    expect(health.body).toContain('NOT_CONFIGURED'); expect(health.body).toContain('AVAILABLE');
+    expect(health.body).not.toContain('apiBaseUrl');
+    expect(health.body).not.toContain('enabledCountries');
+    expect(health.body).not.toContain('capabilities');
+    expect(health.body).not.toContain('providerOperation');
+    const providerEntry = health.json<{ providers: Array<Record<string, unknown>> }>().providers[0];
+    expect(Object.keys(providerEntry ?? {}).sort()).toEqual(['configurationStatus', 'health', 'id', 'simulated']);
     const coverage = await app.inject({ url: '/api/v1/admin/providers/template/coverage/HT' });
     expect(coverage.json()).toMatchObject({ countryCode: 'HT', status: 'NOT_CONFIGURED', customerAvailabilityGuaranteed: false, qualification: { haitiSupported: 'UNKNOWN', fiveG: 'UNKNOWN', persistentEsim: 'UNKNOWN' } });
+  });
+  it('keeps provider admin routes unavailable in production mode', async () => {
+    const productionConfig = { ...config, NODE_ENV: 'production' as const };
+    const built = await buildApp({ db, redis, provider, providerWebhookVerifier: providerVerifier, billing, config: productionConfig });
+    await built.app.ready();
+    try {
+      expect((await built.app.inject({ url: '/api/v1/admin/providers' })).statusCode).toBe(404);
+      expect((await built.app.inject({ method: 'POST', url: '/api/v1/admin/plans/basic/mappings', payload: { providerId: 'mock', productRecordId: randomUUID() } })).statusCode).toBe(404);
+    } finally {
+      await built.app.close();
+    }
   });
   it('records provider operation idempotency with a unique key', async () => {
     const p = await provisioned();
@@ -206,6 +231,21 @@ describe('provider operations and renewals', () => {
     expect((await request()).json()).toMatchObject({ received: true, duplicate: false });
     expect((await request()).json()).toMatchObject({ received: true, duplicate: true });
     expect(await db.reconciliationIssue.count({ where: { kind: 'UNKNOWN_PROVIDER_ESIM' } })).toBe(1);
+  });
+  it('verifies provider webhook signatures against raw request buffers and rejects unsupported providers', async () => {
+    const payload = Buffer.from(JSON.stringify({ eventId: 'provider-event-buffer', type: 'provider.event', reference: 'unknown-ref-2' }));
+    const verifySpy = vi.spyOn(providerVerifier, 'verify');
+    const accepted = await app.inject({ method: 'POST', url: '/api/v1/webhooks/esim/mock', headers: { 'content-type': 'application/json', 'x-esim-signature': providerVerifier.sign(payload) }, payload });
+    expect(accepted.statusCode).toBe(200);
+    expect(verifySpy).toHaveBeenCalledTimes(1);
+    const rawArg = verifySpy.mock.calls[0]?.[0];
+    expect(Buffer.isBuffer(rawArg)).toBe(true);
+    expect(Buffer.compare(rawArg as Buffer, payload)).toBe(0);
+    const invalid = await app.inject({ method: 'POST', url: '/api/v1/webhooks/esim/mock', headers: { 'content-type': 'application/json', 'x-esim-signature': 'invalid' }, payload });
+    expect(invalid.statusCode).toBe(400);
+    expect(invalid.body).not.toContain('provider-event-buffer');
+    const unsupported = await app.inject({ method: 'POST', url: '/api/v1/webhooks/esim/template', headers: { 'content-type': 'application/json', 'x-esim-signature': providerVerifier.sign(payload) }, payload });
+    expect(unsupported.statusCode).toBe(404);
   });
   it('does not start a renewal when a provider lacks persistent top-up capability', async () => {
     const p = await provisioned();

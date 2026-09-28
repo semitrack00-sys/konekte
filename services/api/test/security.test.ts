@@ -23,11 +23,34 @@ describe('security boundaries', () => {
     expect(() => createEsimProvider('mock', 'production')).toThrow();
   });
   it('rejects unknown providers instead of silently falling back', () => { expect(() => createEsimProvider('unknown', 'test')).toThrow(); });
+  it('does not fall back to mock when template provider is explicitly selected', () => {
+    const provider = createEsimProvider('template', 'test', {
+      providerName: 'template',
+      timeoutMs: 1000,
+      retryPolicy: { maxAttempts: 1, baseDelayMs: 0, maxDelayMs: 0 },
+      enabledCountries: ['HT'],
+      environment: 'SANDBOX',
+      capabilityOverrides: {},
+      enabled: true
+    });
+    expect(provider).not.toBeInstanceOf(MockEsimProvider);
+    expect(provider.id).toBe('template');
+  });
   it('rejects Stripe live mode credentials', () => { expect(() => readConfig({ ...environment(), STRIPE_SECRET_KEY: ['sk', 'live', 'rejected'].join('_') })).toThrow('Only Stripe test'); });
   it('allows mock billing without Stripe credentials', () => { expect(readConfig(environment()).BILLING_MODE).toBe('mock'); });
   it('accepts only secret references and rejects provider credential values', () => {
     expect(readConfig({ ...environment(), ESIM_API_KEY_REF: 'PROVIDER_API_KEY', ESIM_WEBHOOK_SECRET_REF: 'secret://konekte/provider/webhook' }).ESIM_API_KEY_REF).toBe('PROVIDER_API_KEY');
     expect(() => readConfig({ ...environment(), ESIM_API_KEY_REF: 'sk_live_sensitive-provider-secret' })).toThrow('secret references');
+    expect(() => readConfig({ ...environment(), ESIM_WEBHOOK_SECRET_REF: 'whsec_live_provider_secret' })).toThrow('secret references');
+    expect(() => readConfig({ ...environment(), ESIM_PROVIDER: 'template', ESIM_PROVIDER_ENABLED: 'true' })).toThrow('incomplete');
+  });
+  it('parses ESIM_PROVIDER_ENABLED as a strict boolean', () => {
+    expect(readConfig(environment()).ESIM_PROVIDER_ENABLED).toBe(false);
+    expect(readConfig({ ...environment(), ESIM_PROVIDER_ENABLED: 'false' }).ESIM_PROVIDER_ENABLED).toBe(false);
+    expect(readConfig({ ...environment(), ESIM_PROVIDER_ENABLED: 'true' }).ESIM_PROVIDER_ENABLED).toBe(true);
+  });
+  it('does not treat ESIM_PROVIDER_ENABLED="false" as truthy during validation', () => {
+    expect(() => readConfig({ ...environment(), ESIM_PROVIDER: 'template', ESIM_PROVIDER_ENABLED: 'false' })).not.toThrow();
     expect(() => readConfig({ ...environment(), ESIM_PROVIDER: 'template', ESIM_PROVIDER_ENABLED: 'true' })).toThrow('incomplete');
   });
   it('requires a complete Stripe test configuration', () => { expect(() => readConfig({ ...environment(), BILLING_MODE: 'stripe_test' })).toThrow('incomplete'); });

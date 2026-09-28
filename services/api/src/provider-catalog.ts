@@ -1,4 +1,4 @@
-import type { PrismaClient } from '@prisma/client';
+import { Prisma, type PrismaClient } from '@prisma/client';
 import type { CatalogProductInput } from '@konekte/esim-provider-sdk';
 import { z } from 'zod';
 
@@ -15,10 +15,14 @@ export async function importProviderCatalog(db: PrismaClient, providerId: string
   const provider = await db.provider.findUnique({ where: { id: providerId } });
   if (!provider) throw new Error('PROVIDER_NOT_FOUND');
   const results = [];
-  for (const product of products) results.push(await db.providerProduct.upsert({
+  for (const product of products) {
+    const networkMetadata = product.networkMetadata === null ? Prisma.JsonNull : product.networkMetadata as Prisma.InputJsonValue;
+    const capabilityMetadata = product.capabilityMetadata === null ? Prisma.JsonNull : product.capabilityMetadata as Prisma.InputJsonValue;
+    results.push(await db.providerProduct.upsert({
     where: { providerId_providerProductId_countryCode: { providerId, providerProductId: product.providerProductId, countryCode: product.countryCode } },
-    create: { providerId, providerProductId: product.providerProductId, countryCode: product.countryCode, name: product.name, dataGb: Math.ceil(product.dataGb), durationDays: product.durationDays, wholesalePriceCents: product.wholesalePriceCents, wholesaleCurrency: product.wholesalePriceCents === null ? null : product.currency.toLowerCase(), networkMetadata: product.networkMetadata ?? undefined, capabilityMetadata: product.capabilityMetadata ?? undefined, simulated: provider.simulated },
-    update: { name: product.name, dataGb: Math.ceil(product.dataGb), durationDays: product.durationDays, wholesalePriceCents: product.wholesalePriceCents, wholesaleCurrency: product.wholesalePriceCents === null ? null : product.currency.toLowerCase(), networkMetadata: product.networkMetadata ?? undefined, capabilityMetadata: product.capabilityMetadata ?? undefined }
-  }));
+    create: { providerId, providerProductId: product.providerProductId, countryCode: product.countryCode, name: product.name, dataGb: Math.ceil(product.dataGb), durationDays: product.durationDays, wholesalePriceCents: product.wholesalePriceCents, wholesaleCurrency: product.wholesalePriceCents === null ? null : product.currency.toLowerCase(), networkMetadata, capabilityMetadata, simulated: provider.simulated },
+    update: { name: product.name, dataGb: Math.ceil(product.dataGb), durationDays: product.durationDays, wholesalePriceCents: product.wholesalePriceCents, wholesaleCurrency: product.wholesalePriceCents === null ? null : product.currency.toLowerCase(), networkMetadata, capabilityMetadata }
+    }));
+  }
   return results;
 }

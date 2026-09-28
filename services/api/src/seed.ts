@@ -1,4 +1,4 @@
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { config } from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
@@ -6,11 +6,12 @@ import { MockEsimProvider, TemplateEsimProvider } from '@konekte/esim-provider-s
 config({ path: fileURLToPath(new URL('../../../.env', import.meta.url)), quiet: true });
 export async function seedPlans(db: PrismaClient) {
   const provider = new MockEsimProvider();
-  const capabilities = { ...provider.capabilities };
+  const capabilities = { ...provider.capabilities } as Prisma.InputJsonValue;
   await db.provider.upsert({ where: { id: provider.id }, create: { id: provider.id, displayName: 'Mock provider (simulated)', enabled: true, simulated: true, healthStatus: 'HEALTHY', capabilities }, update: { displayName: 'Mock provider (simulated)', enabled: true, simulated: true, healthStatus: 'HEALTHY', capabilities } });
   const template = new TemplateEsimProvider();
-  await db.provider.upsert({ where: { id: template.id }, create: { id: template.id, displayName: 'Provider adapter template', enabled: false, simulated: false, healthStatus: 'NOT_CONFIGURED', capabilities: template.capabilities }, update: { displayName: 'Provider adapter template', enabled: false, simulated: false, healthStatus: 'NOT_CONFIGURED', capabilities: template.capabilities } });
-  for (const [id, enabled, simulated, environment, countries] of [[provider.id, true, true, 'SANDBOX', ['HT']], [template.id, false, false, 'SANDBOX', []]] as const) {
+  const templateCapabilities = { ...template.capabilities } as Prisma.InputJsonValue;
+  await db.provider.upsert({ where: { id: template.id }, create: { id: template.id, displayName: 'Provider adapter template', enabled: false, simulated: false, healthStatus: 'NOT_CONFIGURED', capabilities: templateCapabilities }, update: { displayName: 'Provider adapter template', enabled: false, simulated: false, healthStatus: 'NOT_CONFIGURED', capabilities: templateCapabilities } });
+  for (const [id, enabled, environment, countries] of [[provider.id, true, 'SANDBOX', ['HT']], [template.id, false, 'SANDBOX', []]] as const) {
     await db.providerConfiguration.upsert({ where: { providerId: id }, create: { providerId: id, enabled, environment, enabledCountries: [...countries] }, update: { enabled, environment, enabledCountries: [...countries] } });
     await db.providerQualification.upsert({ where: { providerId_countryCode: { providerId: id, countryCode: 'HT' } }, create: { providerId: id, countryCode: 'HT' }, update: {} });
   }

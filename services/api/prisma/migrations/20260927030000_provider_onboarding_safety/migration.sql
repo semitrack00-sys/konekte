@@ -1,0 +1,6 @@
+DO $$
+BEGIN
+  ALTER TYPE "QualificationAnswer" ADD VALUE IF NOT EXISTS 'NOT_APPLICABLE';
+EXCEPTION
+  WHEN duplicate_object THEN NULL;
+END $$;

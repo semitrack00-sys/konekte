@@ -79,11 +79,15 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
     return { accessToken: app.jwt.sign({ sub: user.id, sid: session.id }), refreshToken, user: publicUser(user) };
   }
   app.get('/health', async () => ({ status: 'ok', service: 'konekte-api' }));
-  const providerSummary = async () => {
+  const adminProviderSummary = async () => {
     const providers = await db.provider.findMany({ include: { configuration: true, products: { where: { enabled: true }, select: { id: true } }, operations: { where: { status: { in: ['SUCCEEDED', 'FAILED', 'RETRYABLE_FAILURE', 'RECONCILIATION_REQUIRED'] } }, orderBy: { updatedAt: 'desc' }, take: 20 } } });
     return providers.map(row => ({ id: row.id, displayName: row.displayName, configurationStatus: row.configuration?.enabled ? 'CONFIGURED' : 'NOT_CONFIGURED', environment: row.configuration?.environment ?? null, health: row.simulated ? 'AVAILABLE' : row.configuration?.enabled ? 'UNKNOWN' : 'NOT_CONFIGURED', simulated: row.simulated, countries: row.configuration?.enabledCountries ?? [], capabilities: row.capabilities, productCount: row.products.length, lastSuccessfulOperation: row.operations.find(operation => operation.status === 'SUCCEEDED')?.updatedAt ?? null, lastFailedOperation: row.operations.find(operation => operation.status !== 'SUCCEEDED')?.updatedAt ?? null }));
   };
-  app.get('/health/providers', async () => ({ providers: await providerSummary() }));
+  const publicProviderHealthSummary = async () => {
+    const providers = await db.provider.findMany({ include: { configuration: true } });
+    return providers.map(row => ({ id: row.id, configurationStatus: row.configuration?.enabled ? 'CONFIGURED' : 'NOT_CONFIGURED', health: row.simulated ? 'AVAILABLE' : row.configuration?.enabled ? 'UNKNOWN' : 'NOT_CONFIGURED', simulated: row.simulated }));
+  };
+  app.get('/health/providers', async () => ({ providers: await publicProviderHealthSummary() }));
   app.get('/health/ready', async (_request, reply) => {
     try { await Promise.all([db.$queryRaw`SELECT 1`, redis.ping()]); return { status: 'ready' }; }
     catch { return reply.status(503).send({ status: 'unavailable' }); }
@@ -130,8 +134,10 @@ export async function buildApp(deps: { db: PrismaClient; redis: Redis; provider:
   });
   app.get('/api/v1/me', protectedRoute, async request => publicUser(await db.user.findUniqueOrThrow({ where: { id: request.user.sub } })));
   app.get('/api/v1/plans', async () => db.plan.findMany({ where: { enabled: true }, orderBy: { priceCents: 'asc' } }));
+  // REAL_ADMIN_AUTH_REQUIRED: keep all provider/admin write routes disabled in production
+  // until real authentication and authorization are implemented and approved.
   if (config.NODE_ENV !== 'production') {
-    app.get('/api/v1/admin/providers', providerSummary);
+    app.get('/api/v1/admin/providers', adminProviderSummary);
     app.get('/api/v1/admin/providers/:providerId/coverage/HT', async (request, reply) => {
       const { providerId } = z.object({ providerId: z.string().min(1) }).parse(request.params);
       const row = await db.provider.findUnique({ where: { id: providerId }, include: { configuration: true, qualifications: { where: { countryCode: 'HT' } } } });
