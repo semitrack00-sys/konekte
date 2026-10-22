@@ -1,6 +1,6 @@
 # Zesimo sandbox integration checklist
 
-Tracking: #1. This branch is **pre-integration documentation**, not a working Zesimo adapter. Do not set `ESIM_PROVIDER=zesimo` until implementation and tests are complete.
+Tracking: #1. This branch now contains an isolated **read-only adapter**, not a purchase-capable sandbox integration. See [verification and remaining vendor requirements](ZESIMO-VERIFICATION-2026-10-22.md). Do not set `ESIM_PROVIDER=zesimo`; factory activation remains disabled.
 
 ## Confirmed from vendor correspondence (September 28 and October 21, 2026)
 
@@ -9,7 +9,7 @@ Tracking: #1. This branch is **pre-integration documentation**, not a working Ze
 - Tier 2: deposit USD 1,000, receive USD 1,100 wallet credit. Tier 3: deposit USD 5,000, receive USD 6,000.
 - An eSIM supports **at most three top-ups**. `GET /esims/{id}` now exposes `topups_remaining`. At zero, top-up package retrieval and top-up submission return HTTP 422 without a charge.
 
-## Vendor details still needed before coding live API calls
+## Original discovery checklist (superseded by the dated verification report)
 
 1. Sandbox base URL, authentication scheme, credential generation and rate limits.
 2. Official endpoint definitions and sample redacted payloads for catalog, coverage, ordering, installation details, activation, status, usage, top-up and reconciliation.
