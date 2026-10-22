@@ -22,6 +22,16 @@ function ErrorNotice({ error }: { error: unknown }) {
   if (!error) return null;
   return <Text accessibilityRole="alert" style={styles.error}>{error instanceof ApiError && error.status === 401 ? t.expired : t.error}</Text>;
 }
+function ConnectionGuide() {
+  const t = useText();
+  const [expanded, setExpanded] = useState(true);
+  return <View style={styles.card}>
+    <Text style={styles.title}>{t.connectionGuide}</Text>
+    <Text style={styles.label}>{t.servicePending}</Text>
+    {expanded && <><Text style={styles.label}>{t.internetGuide}</Text><Text style={styles.body}>{t.internetSteps}</Text><Text style={styles.body}>{t.internetScope}</Text><Text style={styles.label}>{t.voiceGuide}</Text><Text style={styles.body}>{t.voiceSteps}</Text></>}
+    <Button secondary onPress={() => setExpanded(!expanded)}>{expanded ? t.exploreDemo : t.connectionGuide}</Button>
+  </View>;
+}
 function Auth() {
   const t = useText();
   const locale = useSession(s => s.locale);
@@ -145,6 +155,7 @@ function Shell() {
     <View style={styles.header}><View><Text style={styles.logo}>konekte<Text style={{ color: theme.colors.primary }}>.</Text></Text><Text style={styles.body}>{t.tagline}</Text></View>
       <View style={styles.languages}>{(['en', 'ht', 'fr'] as Locale[]).map(l => <Pressable accessibilityRole="button" accessibilityLabel={{ en: 'English', ht: 'Kreyòl', fr: 'Français' }[l]} accessibilityState={{ selected: locale === l }} key={l} onPress={() => setLocale(l)} style={[styles.language, locale === l && { backgroundColor: theme.colors.accent }]}><Text style={styles.label}>{l.toUpperCase()}</Text></Pressable>)}</View>
     </View><View style={styles.demoBox}><Text style={styles.demoText}>{t.demo}</Text></View>
+    <ConnectionGuide/>
     {restoring ? <ActivityIndicator/> : tokens ? <Home/> : <Auth/>}
     {tokens && <Button secondary onPress={() => { void logout().catch(() => undefined); }}>{t.logout}</Button>}
     <Text style={styles.footer}>KONEKTE · MVP / 0.1</Text>

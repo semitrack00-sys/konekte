@@ -5,6 +5,7 @@ import { TemplateEsimProvider } from './adapters/template/index.js';
 export * from './contracts/index.js';
 export { MockEsimProvider, MockProviderWebhookVerifier } from './mock/index.js';
 export { TemplateEsimProvider } from './adapters/template/index.js';
+export { ZesimoReadOnlyProvider, type ZesimoReadOnlyOptions } from './adapters/zesimo/index.js';
 export { verifyProviderSandbox, type SandboxCheck, type SandboxVerificationOptions } from './verification.js';
 
 export function createEsimProvider(provider: string, environment: string, config?: ProviderAdapterConfiguration): EsimProvider {
