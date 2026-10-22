@@ -17,7 +17,9 @@ export async function buildIntegrationApp(env: NodeJS.ProcessEnv, transport?: ty
   app.get('/health', async () => ({ status: 'ok', service: 'konekte-integration', purchasesEnabled: false }));
   let lastAttempt = 0;
   let busy = false;
-  app.get('/internal/zesimo/check', async (request, reply) => {
+  app.get('/internal/zesimo/:check', async (request, reply) => {
+    const operation = (request.params as { check: string }).check;
+    if (operation !== 'check' && operation !== 'haiti') return reply.code(404).send({ error: 'NOT_FOUND' });
     const received = createHash('sha256').update(request.headers.authorization ?? '').digest();
     if (!timingSafeEqual(expected, received)) return reply.code(401).send({ error: 'UNAUTHORIZED' });
     if (!env.ZESIMO_API_KEY) return reply.code(503).send({ error: 'ZESIMO_KEY_NOT_CONFIGURED' });
@@ -27,6 +29,12 @@ export async function buildIntegrationApp(env: NodeJS.ProcessEnv, transport?: ty
     try {
       const provider = new ZesimoReadOnlyProvider({ token: env.ZESIMO_API_KEY, fetch: transport });
       await provider.checkAuthentication();
+      if (operation === 'haiti') {
+        const products = await provider.listProducts('HT');
+        return { authenticated: true, countryCode: 'HT', supportedPackageCount: products.length,
+          packages: products.map(({ id, dataGb, durationDays }) => ({ id, dataGb, durationDays })),
+          pricingExposed: false, coverageQualified: false, purchasesEnabled: false, voiceEnabled: false };
+      }
       return { authenticated: true, purchasesEnabled: false };
     } catch {
       return reply.code(503).send({ error: 'ZESIMO_CHECK_FAILED' });

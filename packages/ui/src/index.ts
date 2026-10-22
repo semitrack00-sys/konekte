@@ -1,6 +1,7 @@
 import type { Locale } from '@konekte/shared-types';
 export const theme = { colors: { ink: '#112E32', primary: '#096B5A', accent: '#DAF576', background: '#F4F7F3', paper: '#FFFFFF', muted: '#536B6A', danger: '#A52A38' }, radius: 18 };
 const en = {
+  connectionGuide: 'Internet & +509', internetGuide: 'Mobile internet', internetSteps: 'Use an unlocked, eSIM-compatible phone. Once real service is available, choose a data plan, install its eSIM while connected to Wi-Fi, and select that eSIM for mobile data. Downloading Konekte alone does not activate internet.', internetScope: 'An active data plan provides internet to your phone’s apps where the partner network has coverage. Initial setup needs an existing internet connection.', voiceGuide: 'Your Haitian +509 number', voiceSteps: 'Planned: make and receive calls inside Konekte using Wi-Fi or mobile data. Number availability and provider approval are still pending. No phone number is assigned in this demo.', servicePending: 'Real service is not available yet', exploreDemo: 'Explore the demo',
   tagline: 'A simpler way to stay connected.', demo: 'Demo only. No real internet service. Prices are placeholders.',
   login: 'Sign in', register: 'Create account', email: 'Email', password: 'Password (12+ characters)', logout: 'Sign out',
   compatibility: 'Check your phone', deviceName: 'Phone model', supportsEsim: 'My phone supports eSIM', unlocked: 'My phone is unlocked',
@@ -22,6 +23,7 @@ const en = {
 };
 type Messages = Record<keyof typeof en, string>;
 const ht: Messages = {
+  connectionGuide: 'Entènèt ak +509', internetGuide: 'Entènèt mobil', internetSteps: 'Sèvi ak yon telefòn debloke ki sipòte eSIM. Lè sèvis reyèl la disponib, chwazi yon plan done, enstale eSIM li pandan ou sou Wi-Fi, epi chwazi eSIM sa a pou done mobil. Telechaje Konekte sèlman pa aktive entènèt.', internetScope: 'Yon plan done aktif bay aplikasyon telefòn ou entènèt kote rezo patnè a gen kouvèti. Premye konfigirasyon an bezwen yon koneksyon entènèt ki deja egziste.', voiceGuide: 'Nimewo ayisyen +509 ou', voiceSteps: 'Nan plan an: fè epi resevwa apèl nan Konekte ak Wi-Fi oswa done mobil. Disponibilite nimewo ak apwobasyon founisè a poko konfime. Demonstrasyon sa a pa bay okenn nimewo telefòn.', servicePending: 'Sèvis reyèl la poko disponib', exploreDemo: 'Eksplore demonstrasyon an',
   tagline: 'Yon fason pi senp pou rete konekte.', demo: 'Demonstrasyon sèlman. Pa gen sèvis entènèt reyèl. Pri yo se egzanp.',
   login: 'Konekte', register: 'Kreye kont', email: 'Imèl', password: 'Modpas (12 karaktè oswa plis)', logout: 'Dekonekte',
   compatibility: 'Verifye telefòn ou', deviceName: 'Modèl telefòn', supportsEsim: 'Telefòn mwen sipòte eSIM', unlocked: 'Telefòn mwen debloke',
@@ -42,6 +44,7 @@ const ht: Messages = {
   invalidForm: 'Antre yon imèl valab ak yon modpas ki gen omwen 12 karaktè.', expired: 'Sesyon ou fini. Tanpri konekte ankò.'
 };
 const fr: Messages = {
+  connectionGuide: 'Internet et +509', internetGuide: 'Internet mobile', internetSteps: 'Utilisez un téléphone débloqué compatible eSIM. Lorsque le service réel sera disponible, choisissez un forfait, installez son eSIM en Wi-Fi et sélectionnez-la pour les données mobiles. Télécharger Konekte ne suffit pas à activer internet.', internetScope: 'Un forfait actif fournit internet aux applications du téléphone dans les zones couvertes par le réseau partenaire. La configuration initiale nécessite une connexion internet existante.', voiceGuide: 'Votre numéro haïtien +509', voiceSteps: 'Prévu : passer et recevoir des appels dans Konekte par Wi-Fi ou données mobiles. La disponibilité des numéros et l’accord du fournisseur restent à confirmer. Aucun numéro n’est attribué dans cette démonstration.', servicePending: 'Le service réel n’est pas encore disponible', exploreDemo: 'Explorer la démonstration',
   tagline: 'Une façon plus simple de rester connecté.', demo: 'Démonstration uniquement. Aucun service internet réel. Tarifs indicatifs.',
   login: 'Se connecter', register: 'Créer un compte', email: 'E-mail', password: 'Mot de passe (12 caractères minimum)', logout: 'Se déconnecter',
   compatibility: 'Vérifiez votre téléphone', deviceName: 'Modèle du téléphone', supportsEsim: 'Mon téléphone accepte les eSIM', unlocked: 'Mon téléphone est débloqué',
