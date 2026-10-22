@@ -1,0 +1,21 @@
+# Read-only integration host only. Does not deploy the local demo/customer API.
+services:
+  - type: web
+    name: konekte-integration
+    runtime: node
+    plan: free
+    region: oregon
+    branch: codex/zesimo-sandbox-integration
+    autoDeployTrigger: "off"
+    buildCommand: corepack pnpm@10.28.2 install --frozen-lockfile --prod=false && corepack pnpm@10.28.2 db:generate && corepack pnpm@10.28.2 --filter @konekte/api build
+    startCommand: node services/api/dist/integration-server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 24.19.0
+      - key: NODE_ENV
+        value: production
+      - key: KONEKTE_DIAGNOSTIC_TOKEN
+        generateValue: true
+      - key: ZESIMO_API_KEY
+        sync: false
